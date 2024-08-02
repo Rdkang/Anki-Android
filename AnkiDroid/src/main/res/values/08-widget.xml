@@ -26,7 +26,7 @@
         <item quantity="other">%d AnkiDroid cards due</item>
     </plurals>
 
-    <string name="widget_small" comment="Label of the small ankidroid widget. This text can't be found directly in AnkiDroid">AnkiDroid small</string>
+    <string name="widget_small" comment="Label of the small ankidroid widget. This text can't be found directly in AnkiDroid">testo AnkiDroid small</string>
 
     <plurals name="widget_cards_due">
         <item quantity="one">%d card due</item>
