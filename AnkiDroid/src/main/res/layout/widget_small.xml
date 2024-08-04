@@ -18,10 +18,9 @@
         android:clickable="false"
         android:contentDescription="@string/app_name"
         android:focusable="false"
+        android:foregroundTint="@color/material_dynamic_primary60"
         android:scaleType="fitCenter"
-        android:src="@drawable/ic_widget_add_note"
-        android:tint="@color/material_dynamic_primary40"
-        android:tintMode="multiply" />
+        android:src="@drawable/ic_widget_add_note" />
 
     <ImageButton
         android:id="@+id/ankidroid_widget_small_finish_layout"
