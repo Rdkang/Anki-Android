@@ -20,7 +20,7 @@
         android:focusable="false"
         android:foregroundTint="@color/material_dynamic_primary60"
         android:scaleType="fitCenter"
-        android:src="@drawable/ic_widget_small" />
+        android:src="@drawable/ic_anki_dynamic" />
 
     <ImageButton
         android:id="@+id/ankidroid_widget_small_finish_layout"
@@ -52,11 +52,15 @@
             android:id="@+id/widget_due"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:minWidth="25sp"
+            android:minHeight="25sp"
+            android:padding="3sp"
             android:background="@drawable/circle_background"
             android:gravity="center"
             android:singleLine="true"
-            android:textColor="@android:color/system_accent1_50"
-            android:textSize="18sp"
+            android:text="27"
+            android:textColor="@android:color/system_accent1_0"
+            android:textSize="16sp"
             android:visibility="invisible"
             tools:visibility="visible" />
 
@@ -65,12 +69,16 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_alignParentBottom="true"
-            android:layout_alignParentEnd="true"
-            android:background="@android:color/system_accent2_500"
+            android:layout_alignParentEnd="false"
+            android:background="@drawable/circle_background"
             android:gravity="center"
+            android:text="⏱2"
+            android:padding="3sp"
             android:singleLine="true"
-            android:textColor="@android:color/system_accent2_100"
-            android:textSize="16sp"
+            android:minWidth="15sp"
+            android:minHeight="15sp"
+            android:textColor="@android:color/system_accent1_0"
+            android:textSize="14sp"
             android:visibility="invisible"
             tools:visibility="visible" />
     </RelativeLayout>

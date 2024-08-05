@@ -148,7 +148,7 @@ class AnkiDroidWidgetSmall : AnalyticsWidgetProvider() {
                         updateViews.setViewVisibility(R.id.widget_eta, View.INVISIBLE)
                     } else {
                         updateViews.setViewVisibility(R.id.widget_eta, View.VISIBLE)
-                        updateViews.setTextViewText(R.id.widget_eta, eta.toString())
+                        updateViews.setTextViewText(R.id.widget_eta, "⏱$eta")
                         updateViews.setContentDescription(R.id.widget_eta, context.resources.getQuantityString(R.plurals.widget_eta, eta, eta))
                     }
                 }
