@@ -44,11 +44,13 @@ import com.ichi2.anki.browser.CardBrowserViewModel.RowSelection
 import com.ichi2.anki.browser.CardBrowserViewModel.SearchState
 import com.ichi2.anki.browser.CardBrowserViewModel.ToggleSelectionState.SELECT_ALL
 import com.ichi2.anki.browser.CardBrowserViewModel.ToggleSelectionState.SELECT_NONE
+import com.ichi2.anki.browser.CardBrowserViewModelTestBase.InitMode
 import com.ichi2.anki.browser.RepositionCardsRequest.NoRepositionableCardsError
 import com.ichi2.anki.browser.RepositionCardsRequest.RepositionData
 import com.ichi2.anki.browser.search.SavedSearch
 import com.ichi2.anki.common.destinations.NoteEditorDestination
 import com.ichi2.anki.common.utils.ext.ifNotZero
+import com.ichi2.anki.common.utils.ext.ignoreAccentsInSearch
 import com.ichi2.anki.export.ExportDialogFragment
 import com.ichi2.anki.flagCardForNote
 import com.ichi2.anki.libanki.BrowserConfig
@@ -65,7 +67,6 @@ import com.ichi2.anki.model.CardStateFilter
 import com.ichi2.anki.model.CardsOrNotes
 import com.ichi2.anki.model.SelectableDeck
 import com.ichi2.anki.model.SortType
-import com.ichi2.anki.model.cardBrowserNoSorting
 import com.ichi2.anki.noteeditor.toIntent
 import com.ichi2.anki.observability.ensureNoOpsExecuted
 import com.ichi2.anki.observability.ensureOpWithHandler
@@ -75,9 +76,7 @@ import com.ichi2.anki.servicelayer.NoteService
 import com.ichi2.anki.setFlagFilterSync
 import com.ichi2.anki.settings.Prefs
 import com.ichi2.anki.utils.ext.defaultBrowserSearch
-import com.ichi2.anki.utils.ext.ignoreAccentsInSearch
 import com.ichi2.testutils.IntentAssert
-import com.ichi2.testutils.JvmTest
 import com.ichi2.testutils.createTransientDirectory
 import com.ichi2.testutils.ext.reopenWithLanguage
 import com.ichi2.testutils.mockIt
@@ -112,8 +111,6 @@ import org.junit.runner.RunWith
 import timber.log.Timber
 import java.io.File
 import java.io.IOException
-import kotlin.io.path.createTempDirectory
-import kotlin.io.path.pathString
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
@@ -121,14 +118,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-@RunWith(AndroidJUnit4::class)
-class CardBrowserViewModelTest : JvmTest() {
-    override fun setUp() {
-        super.setUp()
-        Prefs.putString(com.ichi2.anki.R.string.pref_browser_no_sorting, null)
-        preventDayRolloverAlarmFromUnburyingCards()
-    }
-
+class CardBrowserViewModelTest : JvmCardBrowserViewModelTestBase() {
     @Test
     fun `delete search history - Issue 14989`() =
         runViewModelTest {
@@ -282,24 +272,6 @@ class CardBrowserViewModelTest : JvmTest() {
 
     /** 7420  */
     @Test
-    fun addCardDeckIsNotSetIfAllDecksSelectedAfterLoad() =
-        runViewModelTest {
-            addDeck("NotDefault")
-
-            assertThat("All decks should not be selected", !hasSelectedAllDecks())
-
-            setSelectedDeck(SelectableDeck.AllDecks)
-
-            assertThat("All decks should be selected", hasSelectedAllDecks())
-
-            val addIntent =
-                NoteEditorDestination
-                    .AddNoteFromCardBrowser(searchTerms = searchTerms, deckId = lastDeckId)
-                    .toIntent(mockIt())
-            IntentAssert.doesNotHaveExtra(addIntent.extras, NoteEditorFragment.EXTRA_DID)
-        }
-
-    @Test
     fun filterByFlagDisplaysProperly() =
         runViewModelTest {
             val cardWithRedFlag = addBasicNote("Card with red flag", "Reverse")
@@ -414,27 +386,25 @@ class CardBrowserViewModelTest : JvmTest() {
         }
 
     @Test
-    fun `EXTRA_DECK_ID intent opens the specified deck`() =
+    fun `initial deck opens the specified deck`() =
         runTest {
             val deckId = addDeck("New")
-            val savedState = SavedStateHandle(mapOf(CardBrowserViewModel.EXTRA_DECK_ID to deckId))
-            viewModel(savedStateHandle = savedState).apply {
+            viewModel(initialDeckId = deckId).apply {
                 assertThat("intent deck is selected", deckId, equalTo(this.deckId))
             }
         }
 
     @Test
-    fun `EXTRA_DECK_ID intent persists deck to lastDeckIdRepository`() =
+    fun `initial deck persists to lastDeckIdRepository`() =
         runTest {
             val deckId = addDeck("New")
-            val savedState = SavedStateHandle(mapOf(CardBrowserViewModel.EXTRA_DECK_ID to deckId))
-            viewModel(savedStateHandle = savedState).apply {
+            viewModel(initialDeckId = deckId).apply {
                 assertThat("deck persisted for next launch", lastDeckId, equalTo(deckId))
             }
         }
 
     @Test
-    fun `no EXTRA_DECK_ID falls back to lastDeckIdRepository`() =
+    fun `no initial deck falls back to lastDeckIdRepository`() =
         runTest {
             val deckId = addDeck("Persisted")
             viewModel(lastDeckId = deckId).apply {
@@ -443,12 +413,11 @@ class CardBrowserViewModelTest : JvmTest() {
         }
 
     @Test
-    fun `EXTRA_DECK_ID for unknown deck falls back to lastDeckIdRepository`() =
+    fun `unknown initial deck falls back to lastDeckIdRepository`() =
         runTest {
             val persisted = addDeck("Persisted")
             val unknownDeckId: DeckId = 9_999_999_999L
-            val savedState = SavedStateHandle(mapOf(CardBrowserViewModel.EXTRA_DECK_ID to unknownDeckId))
-            viewModel(lastDeckId = persisted, savedStateHandle = savedState).apply {
+            viewModel(lastDeckId = persisted, initialDeckId = unknownDeckId).apply {
                 assertThat("unknown intent deck is ignored", persisted, equalTo(this.deckId))
             }
         }
@@ -458,7 +427,7 @@ class CardBrowserViewModelTest : JvmTest() {
         runTest {
             val intentDeckId = addDeck("From intent")
             val userDeckId = addDeck("User selection")
-            val savedState = SavedStateHandle(mapOf(CardBrowserViewModel.EXTRA_DECK_ID to intentDeckId))
+            val savedState = SavedStateHandle()
 
             val persistentRepo =
                 object : LastDeckIdRepository {
@@ -467,6 +436,7 @@ class CardBrowserViewModelTest : JvmTest() {
 
             // setup: initial launch + select new deck
             viewModel(
+                initialDeckId = intentDeckId,
                 savedStateHandle = savedState,
                 lastDeckIdRepository = persistentRepo,
             ).apply {
@@ -477,6 +447,7 @@ class CardBrowserViewModelTest : JvmTest() {
 
             // intent does not override user selection
             viewModel(
+                initialDeckId = intentDeckId,
                 savedStateHandle = savedState,
                 lastDeckIdRepository = persistentRepo,
             ).apply {
@@ -971,6 +942,24 @@ class CardBrowserViewModelTest : JvmTest() {
         }
 
     @Test
+    fun `loadFindAndReplaceNoteIds reports progress`() =
+        runViewModelTest(notes = 2) {
+            selectRowsWithPositions(0)
+            val selectedNoteIds = queryAllSelectedNoteIds()
+
+            assertProgressAround { assertThat(loadFindAndReplaceNoteIds(), equalTo(selectedNoteIds)) }
+        }
+
+    @Test
+    fun `loadColumnSelection reports progress`() =
+        runViewModelTest(notes = 1) {
+            assertProgressAround {
+                val (displayed, _) = loadColumnSelection(CardsOrNotes.CARDS)
+                assertThat(displayed.map { it.columnType }, equalTo(listOf(SFLD, CARD, DUE, DECK)))
+            }
+        }
+
+    @Test
     fun `editSelectedCardsTags reports progress and tags the selected note`() =
         runViewModelTest(notes = 2) {
             selectRowsWithPositions(0)
@@ -1104,7 +1093,7 @@ class CardBrowserViewModelTest : JvmTest() {
             val data = queryPreviewIntentData()
             assertThat(data.currentIndex, equalTo(0))
 
-            data.idsFile.getIds().also { actualCardIds ->
+            assertNotNull(data.idsFile.getIdsOrNull()).also { actualCardIds ->
                 assertThat("previewing a note previews cards", actualCardIds, hasSize(5))
 
                 val firstCardIds =
@@ -1128,7 +1117,7 @@ class CardBrowserViewModelTest : JvmTest() {
         runViewModelTest(notes = 2) {
             val data = queryPreviewIntentData()
             assertThat(data.currentIndex, equalTo(0))
-            assertThat(data.idsFile.getIds(), hasSize(2))
+            assertThat(data.idsFile.getIdsOrNull(), hasSize(2))
         }
 
     @Test
@@ -1137,7 +1126,7 @@ class CardBrowserViewModelTest : JvmTest() {
             selectRowsWithPositions(0).also {
                 val data = queryPreviewIntentData()
                 assertThat(data.currentIndex, equalTo(0))
-                assertThat(data.idsFile.getIds(), hasSize(2))
+                assertThat(data.idsFile.getIdsOrNull(), hasSize(2))
             }
 
             selectNone()
@@ -1146,7 +1135,7 @@ class CardBrowserViewModelTest : JvmTest() {
             selectRowsWithPositions(1).also {
                 val data = queryPreviewIntentData()
                 assertThat(data.currentIndex, equalTo(1))
-                assertThat(data.idsFile.getIds(), hasSize(2))
+                assertThat(data.idsFile.getIdsOrNull(), hasSize(2))
             }
         }
 
@@ -1658,66 +1647,64 @@ class CardBrowserViewModelTest : JvmTest() {
         }
 
     @Test
-    fun `searchResultMessage - user search, all decks selected, with rows`() =
+    fun `initial search does not request feedback - Issue 21242`() =
+        runViewModelTest(notes = 2, initMode = InitMode.MANUAL) {
+            flowOfSearchState.test {
+                manualInit()
+                val completed = awaitSearchCompleted()
+                assertThat(completed.rowCount, equalTo(2))
+                assertThat(completed.feedbackMode, equalTo(BrowserSearchFeedbackMode.NONE))
+            }
+        }
+
+    @Test
+    fun `completed search retains the feedback mode and deck scope`() =
         runViewModelTest(notes = 3) {
             flowOfSearchState.test {
                 ignoreEventsDuringViewModelInit()
                 setSelectedDeck(SelectableDeck.AllDecks)
                 awaitSearchCompleted()
-                setQuery("", fromUserSearch = true)
+                setQuery("", feedbackMode = BrowserSearchFeedbackMode.SEARCH_RESULTS)
                 val completed = awaitSearchCompleted()
-                val card = completed.resultMessage as CardBrowserViewModel.SearchResultMessage.CardCount
                 assertThat("count", completed.rowCount, equalTo(3))
                 assertThat("cardsOrNotes", completed.cardsOrNotes, equalTo(CardsOrNotes.CARDS))
-                assertThat("no all-decks action when already on all decks", card.includeSearchAllDecksAction, equalTo(false))
+                assertThat(completed.feedbackMode, equalTo(BrowserSearchFeedbackMode.SEARCH_RESULTS))
+                assertThat(completed.allDecksSelected, equalTo(true))
             }
         }
 
     @Test
-    fun `searchResultMessage - user search, specific deck with cards has all-decks action`() =
+    fun `deck change does not request search feedback`() =
         runViewModelTest {
             val deck = addDeck("Specific")
             addNoteToDeck(deck)
             flowOfSearchState.test {
                 ignoreEventsDuringViewModelInit()
                 setSelectedDeck(deck)
-                awaitSearchCompleted()
-                setQuery("", fromUserSearch = true)
-                val card = awaitSearchCompleted().resultMessage as CardBrowserViewModel.SearchResultMessage.CardCount
-                assertThat("includes all-decks action", card.includeSearchAllDecksAction, equalTo(true))
+                val completed = awaitSearchCompleted()
+                assertThat(completed.rowCount, equalTo(1))
+                assertThat(completed.feedbackMode, equalTo(BrowserSearchFeedbackMode.NONE))
+                assertThat(completed.allDecksSelected, equalTo(false))
             }
         }
 
     @Test
-    fun `searchResultMessage - user search, specific deck with no cards`() =
-        runViewModelTest {
-            val deck = addDeck("Empty")
+    fun `sorting and reversing do not request search feedback`() =
+        runViewModelTest(notes = 2) {
             flowOfSearchState.test {
                 ignoreEventsDuringViewModelInit()
-                setSelectedDeck(deck)
-                awaitSearchCompleted()
-                setQuery("", fromUserSearch = true)
-                assertThat(
-                    "empty deck → no-cards-in-selected-deck",
-                    awaitSearchCompleted().resultMessage,
-                    equalTo(CardBrowserViewModel.SearchResultMessage.NoCardsInSelectedDeck),
-                )
-            }
-        }
-
-    @Test
-    fun `searchResultMessage - no message on deck change`() =
-        runViewModelTest {
-            val deck = addDeck("Specific")
-            addNoteToDeck(deck)
-            flowOfSearchState.test {
-                ignoreEventsDuringViewModelInit()
-                setSelectedDeck(deck)
-                assertThat(
-                    "changing deck does not surface a result message",
-                    awaitSearchCompleted().resultMessage,
-                    nullValue(),
-                )
+                val sortOrders =
+                    listOf(
+                        SortType.CollectionOrdering(BrowserColumnKey("noteCrt"), reverse = false),
+                        SortType.CollectionOrdering(BrowserColumnKey("noteCrt"), reverse = true),
+                        SortType.NoOrdering,
+                    )
+                for (sort in sortOrders) {
+                    setSortType(sort).join()
+                    val completed = awaitSearchCompleted()
+                    assertThat("sorting retains the results", completed.rowCount, equalTo(2))
+                    assertThat("sorting has its own feedback", completed.feedbackMode, equalTo(BrowserSearchFeedbackMode.NONE))
+                }
             }
         }
 
@@ -1775,173 +1762,6 @@ class CardBrowserViewModelTest : JvmTest() {
             assertInstanceOf<SingleSelectCause.NavigateBack>(handle.multiselectMode, "initial multiselect state")
         }
     }
-
-    @Test
-    fun `multiselect checked state is restored`() {
-        val handle = SavedStateHandle()
-        var idOfSelectedRow: CardOrNoteId? = null
-        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
-            selectRowAtPosition(1)
-            idOfSelectedRow = selectedRows.single()
-            // HACK: easiest way to add it to the bundle. This is called on destruction
-            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
-        }
-
-        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
-            assertThat("row is still selected", selectedRows, hasSize(1))
-            assertThat("same row is selected", selectedRows.single(), equalTo(idOfSelectedRow))
-        }
-    }
-
-    @Test
-    fun `no multiselect state file is written for an empty selection`() =
-        runViewModelTest(notes = 1, initMode = InitMode.NO_DELAY) {
-            assertThat(
-                "no selection: no value is saved",
-                generateExpensiveSavedState().containsKey(STATE_MULTISELECT_VALUES),
-                equalTo(false),
-            )
-        }
-
-    @Test
-    fun `19572 - a deleted multiselect state file results in an empty selection`() {
-        val handle = SavedStateHandle()
-        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
-            selectRowAtPosition(1)
-            // HACK: easiest way to add it to the bundle. This is called on destruction
-            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
-        }
-
-        // the OS may clear the cache directory between saving state and restoring it
-        val file = handle.multiselectStateFile!!
-        assertThat("state file is deleted", file.delete(), equalTo(true))
-
-        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
-            assertThat("no rows are selected", selectedRows, empty())
-        }
-    }
-
-    @Test
-    fun `corrupt multiselect state file results in an empty selection`() {
-        val handle = SavedStateHandle()
-        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
-            selectRowAtPosition(1)
-            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
-        }
-
-        // A negative count must be treated as corrupt data, not a programming error.
-        handle.multiselectStateFile!!.writeBytes(ByteArray(4) { -1 })
-
-        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
-            assertThat("no rows are selected", selectedRows, empty())
-            assertThat("multiselect mode is preserved", isInMultiSelectMode, equalTo(true))
-        }
-    }
-
-    @Test
-    fun `multiselect state is kept if saved before the selection is restored`() {
-        val handle = SavedStateHandle()
-        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
-            selectRowAtPosition(1)
-            // HACK: easiest way to add it to the bundle. This is called on destruction
-            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
-        }
-
-        // MANUAL: the restored selection has not been applied to the rows when state is saved
-        runViewModelTest(savedStateHandle = handle, initMode = InitMode.MANUAL) {
-            assertThat("rows are not yet selected", selectedRows, empty())
-            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
-        }
-
-        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
-            assertThat("row is selected after restore", selectedRows, hasSize(1))
-        }
-    }
-
-    @Test
-    fun `saved state reflects a selection changed after restore`() {
-        val handle = SavedStateHandle()
-        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
-            selectRowAtPosition(1)
-            // HACK: easiest way to add it to the bundle. This is called on destruction
-            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
-        }
-
-        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
-            assertThat("row is selected after restore", selectedRows, hasSize(1))
-            selectRowAtPosition(0)
-            assertThat("two rows are selected", selectedRows, hasSize(2))
-
-            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
-            val savedIds = handle.multiselectStateFile!!.getIds()
-            val expectedIds = selectedRows.map { it.cardOrNoteId }
-            assertThat("saved selection matches the rows", savedIds, containsInAnyOrder(*expectedIds.toTypedArray()))
-        }
-    }
-
-    @Test
-    fun `superseded multiselect state file is deleted`() =
-        runViewModelTest(notes = 2, initMode = InitMode.NO_DELAY) {
-            selectRowAtPosition(1)
-            val firstFile = generateExpensiveSavedState().multiselectStateFile!!
-            assertThat("first state file exists", firstFile.exists(), equalTo(true))
-
-            val secondFile = generateExpensiveSavedState().multiselectStateFile!!
-            assertThat("second state file exists", secondFile.exists(), equalTo(true))
-            assertThat("first state file was deleted", firstFile.exists(), equalTo(false))
-        }
-
-    @Test
-    fun `restored multiselect state file is deleted when superseded`() {
-        val handle = SavedStateHandle()
-        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
-            selectRowAtPosition(1)
-            // Simulate the saved-state provider saving its bundle.
-            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
-        }
-
-        val restoredFile = handle.multiselectStateFile!!
-        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
-            assertThat("row is selected after restore", selectedRows, hasSize(1))
-
-            val newFile = generateExpensiveSavedState().multiselectStateFile!!
-            assertThat("new state file exists", newFile.exists(), equalTo(true))
-            assertThat("restored state file was deleted", restoredFile.exists(), equalTo(false))
-        }
-    }
-
-    @Test
-    fun `failed replacement preserves restored multiselect state file`() {
-        val handle = SavedStateHandle()
-        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
-            selectRowAtPosition(1)
-            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
-        }
-        val restoredFile = assertNotNull(handle.multiselectStateFile)
-        val savedIds = restoredFile.getIds()
-
-        // A missing cache directory makes the replacement write fail without affecting the old file.
-        runViewModelTest(
-            savedStateHandle = handle,
-            initMode = InitMode.NO_DELAY,
-            cacheDir = File(createTransientDirectory(), "missing"),
-        ) {
-            assertThat("selection is restored", selectedRows, hasSize(1))
-            assertFailsWith<IOException> { generateExpensiveSavedState() }
-            assertThat("previous snapshot remains readable", restoredFile.getIds(), equalTo(savedIds))
-        }
-    }
-
-    @Test
-    fun `multiselect state file is deleted when an empty selection is saved`() =
-        runViewModelTest(notes = 2, initMode = InitMode.NO_DELAY) {
-            selectRowAtPosition(1)
-            val file = generateExpensiveSavedState().multiselectStateFile!!
-            endMultiSelectMode(SingleSelectCause.NavigateBack)
-
-            assertNull(generateExpensiveSavedState().multiselectStateFile)
-            assertThat("previous state file was deleted", file.exists(), equalTo(false))
-        }
 
     @Test
     fun `change note type - no selection`() =
@@ -2139,6 +1959,51 @@ class CardBrowserViewModelTest : JvmTest() {
     }
 
     @Test
+    fun `external search launches request feedback`() {
+        for (options in listOf(DeepLink("cat"), SystemContextMenu("cat"), CardBrowserLaunchOptions.SearchQueryJs("cat", allDecks = true))) {
+            runViewModelTest(options = options) {
+                waitForSearchResults()
+                assertEquals(BrowserSearchFeedbackMode.SEARCH_RESULTS, flowOfSearchFeedback.value?.feedbackMode)
+            }
+        }
+    }
+
+    @Test
+    fun `restoring notes mode on startup does not request feedback`() =
+        runViewModelNotesTest(notes = 1) {
+            waitForSearchResults()
+            assertEquals(CardsOrNotes.NOTES, cardsOrNotes)
+            assertNull(flowOfSearchFeedback.value)
+        }
+
+    @Test
+    fun `a newer automatic refresh discards unshown feedback`() =
+        runViewModelTest(notes = 1) {
+            setQuery("", feedbackMode = BrowserSearchFeedbackMode.SEARCH_RESULTS).join()
+            waitForSearchResults()
+            val feedback = assertNotNull(flowOfSearchFeedback.value)
+
+            launchSearchForCards()
+            waitForSearchResults()
+
+            assertNull(flowOfSearchFeedback.value)
+            assertEquals(false, consumeSearchFeedback(feedback))
+        }
+
+    @Test
+    fun `feedback is consumed once but identical later searches still request it`() =
+        runViewModelTest(notes = 1) {
+            repeat(2) {
+                setQuery("", feedbackMode = BrowserSearchFeedbackMode.SEARCH_RESULTS).join()
+                waitForSearchResults()
+                val feedback = assertNotNull(flowOfSearchFeedback.value)
+                assertEquals(true, consumeSearchFeedback(feedback))
+                assertEquals(false, consumeSearchFeedback(feedback))
+                assertNull(flowOfSearchFeedback.value)
+            }
+        }
+
+    @Test
     fun `setDefaultSearchText round-trips through collection config`() {
         try {
             Prefs.devUsingCardBrowserSearchView = true
@@ -2286,108 +2151,213 @@ class CardBrowserViewModelTest : JvmTest() {
                 putBoolean("card_browser_show_media_filenames", value)
             }
 
-    private fun runViewModelNotesTest(
-        notes: Int = 0,
-        initMode: InitMode = InitMode.AUTOMATIC,
-        options: CardBrowserLaunchOptions? = null,
-        testBody: suspend CardBrowserViewModel.() -> Unit,
-    ) = runTest {
-        CardsOrNotes.NOTES.saveToCollection(col)
-        repeat(notes) {
-            // ensure 1 note = 2 cards
-            addBasicAndReversedNote()
-        }
-        val viewModel =
-            CardBrowserViewModel(
-                lastDeckIdRepository = SharedPreferencesLastDeckIdRepository(),
-                cacheDir = createTransientDirectory(),
-                options = options,
-                preferences = AnkiDroidApp.sharedPreferencesProvider,
-                isFragmented = false,
-                manualInit = initMode == InitMode.MANUAL || initMode == InitMode.AUTOMATIC,
-                savedStateHandle = SavedStateHandle(),
-            )
-        // makes ignoreValuesFromViewModelLaunch work under test
-        if (initMode == InitMode.AUTOMATIC) {
-            viewModel.manualInit()
-        }
-        testBody(viewModel)
-    }
-
-    private fun runViewModelTest(
-        notes: Int = 0,
-        initMode: InitMode = InitMode.AUTOMATIC,
-        savedStateHandle: SavedStateHandle = SavedStateHandle(),
-        options: CardBrowserLaunchOptions? = null,
-        isFragmented: Boolean = false,
-        cacheDir: File = createTransientDirectory(),
-        testBody: suspend CardBrowserViewModel.() -> Unit,
-    ) = runTest {
-        repeat(notes) {
-            addBasicNote()
-        }
-        notes.ifNotZero { count -> Timber.d("added %d notes", count) }
-        val viewModel =
-            CardBrowserViewModel(
-                lastDeckIdRepository = SharedPreferencesLastDeckIdRepository(),
-                cacheDir = cacheDir,
-                options = options,
-                preferences = AnkiDroidApp.sharedPreferencesProvider,
-                isFragmented = isFragmented,
-                manualInit = initMode == InitMode.MANUAL || initMode == InitMode.AUTOMATIC,
-                savedStateHandle = savedStateHandle,
-            )
-        // makes ignoreValuesFromViewModelLaunch work under test
-        if (initMode == InitMode.AUTOMATIC) {
-            viewModel.manualInit()
-        }
-        testBody(viewModel)
-        Timber.d("end runViewModelTest")
-    }
-
     companion object {
         const val EXPECTED_SOUND = "\uD83D\uDD09david.mp3\uD83D\uDD09"
         const val EXPECTED_TTS = "\uD83D\uDCACTest\uD83D\uDCAC"
+    }
+}
 
-        private suspend fun viewModel(
-            lastDeckId: DeckId? = null,
-            intent: CardBrowserLaunchOptions? = null,
-            mode: CardsOrNotes = CardsOrNotes.CARDS,
-            savedStateHandle: SavedStateHandle = SavedStateHandle(),
-            lastDeckIdRepository: LastDeckIdRepository =
-                object : LastDeckIdRepository {
-                    override var lastDeckId: DeckId? = lastDeckId
-                },
-        ): CardBrowserViewModel {
-            // default is CARDS, do nothing in this case
-            if (mode == CardsOrNotes.NOTES) {
-                CollectionManager.withCol { mode.saveToCollection(this@withCol) }
-            }
+/** Android parcel and Intent integration remains alongside the JVM domain tests. */
+@RunWith(AndroidJUnit4::class)
+class CardBrowserViewModelAndroidTest : CardBrowserViewModelTestBase() {
+    @Test
+    fun addCardDeckIsNotSetIfAllDecksSelectedAfterLoad() =
+        runViewModelTest {
+            addDeck("NotDefault")
 
-            val cache = File(createTempDirectory().pathString)
-            return CardBrowserViewModel(
-                lastDeckIdRepository = lastDeckIdRepository,
-                cacheDir = cache,
-                options = intent,
-                isFragmented = false,
-                preferences = AnkiDroidApp.sharedPreferencesProvider,
-                savedStateHandle = savedStateHandle,
-            ).apply {
-                invokeInitialSearch()
-            }
+            assertThat("All decks should not be selected", !hasSelectedAllDecks())
+
+            setSelectedDeck(SelectableDeck.AllDecks)
+
+            assertThat("All decks should be selected", hasSelectedAllDecks())
+
+            val addIntent =
+                NoteEditorDestination
+                    .AddNoteFromCardBrowser(searchTerms = searchTerms, deckId = lastDeckId)
+                    .toIntent(mockIt())
+            IntentAssert.doesNotHaveExtra(addIntent.extras, NoteEditorFragment.EXTRA_DID)
+        }
+
+    @Test
+    fun `multiselect checked state is restored`() {
+        val handle = SavedStateHandle()
+        var idOfSelectedRow: CardOrNoteId? = null
+        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
+            selectRowAtPosition(1)
+            idOfSelectedRow = selectedRows.single()
+            // HACK: easiest way to add it to the bundle. This is called on destruction
+            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
+        }
+
+        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
+            assertThat("row is still selected", selectedRows, hasSize(1))
+            assertThat("same row is selected", selectedRows.single(), equalTo(idOfSelectedRow))
         }
     }
 
-    enum class InitMode {
-        /** init { } runs as normal */
-        NO_DELAY,
+    @Test
+    fun `no multiselect state file is written for an empty selection`() =
+        runViewModelTest(notes = 1, initMode = InitMode.NO_DELAY) {
+            assertThat(
+                "no selection: no value is saved",
+                generateExpensiveSavedState().containsKey(STATE_MULTISELECT_VALUES),
+                equalTo(false),
+            )
+        }
 
-        /** init { } is delayed, via a call to [CardBrowserViewModel.manualInit] is called */
-        AUTOMATIC,
+    @Test
+    fun `19572 - a deleted multiselect state file results in an empty selection`() {
+        val handle = SavedStateHandle()
+        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
+            selectRowAtPosition(1)
+            // HACK: easiest way to add it to the bundle. This is called on destruction
+            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
+        }
 
-        /** init is not run, and a manual invocation of [CardBrowserViewModel.manualInit] is necessary */
-        MANUAL,
+        // the OS may clear the cache directory between saving state and restoring it
+        val file = handle.multiselectStateFile!!
+        assertThat("state file is deleted", file.delete(), equalTo(true))
+
+        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
+            assertThat("no rows are selected", selectedRows, empty())
+        }
     }
+
+    @Test
+    fun `corrupt multiselect state file results in an empty selection`() {
+        val handle = SavedStateHandle()
+        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
+            selectRowAtPosition(1)
+            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
+        }
+
+        // A negative count must be treated as corrupt data, not a programming error.
+        handle.multiselectStateFile!!.writeBytes(ByteArray(4) { -1 })
+
+        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
+            assertThat("no rows are selected", selectedRows, empty())
+            assertThat("multiselect mode is preserved", isInMultiSelectMode, equalTo(true))
+        }
+    }
+
+    @Test
+    fun `multiselect state is kept if saved before the selection is restored`() {
+        val handle = SavedStateHandle()
+        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
+            selectRowAtPosition(1)
+            // HACK: easiest way to add it to the bundle. This is called on destruction
+            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
+        }
+
+        // MANUAL: the restored selection has not been applied to the rows when state is saved
+        runViewModelTest(savedStateHandle = handle, initMode = InitMode.MANUAL) {
+            assertThat("rows are not yet selected", selectedRows, empty())
+            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
+        }
+
+        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
+            assertThat("row is selected after restore", selectedRows, hasSize(1))
+        }
+    }
+
+    @Test
+    fun `saved state reflects a selection changed after restore`() {
+        val handle = SavedStateHandle()
+        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
+            selectRowAtPosition(1)
+            // HACK: easiest way to add it to the bundle. This is called on destruction
+            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
+        }
+
+        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
+            assertThat("row is selected after restore", selectedRows, hasSize(1))
+            selectRowAtPosition(0)
+            assertThat("two rows are selected", selectedRows, hasSize(2))
+
+            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
+            val savedIds = handle.multiselectStateFile!!.getIdsOrNull()
+            val expectedIds = selectedRows.map { it.cardOrNoteId }
+            assertThat("saved selection matches the rows", savedIds, containsInAnyOrder(*expectedIds.toTypedArray()))
+        }
+    }
+
+    @Test
+    fun `superseded multiselect state file is deleted`() =
+        runViewModelTest(notes = 2, initMode = InitMode.NO_DELAY) {
+            selectRowAtPosition(1)
+            val firstFile = generateExpensiveSavedState().multiselectStateFile!!
+            assertThat("first state file exists", firstFile.exists(), equalTo(true))
+
+            val secondFile = generateExpensiveSavedState().multiselectStateFile!!
+            assertThat("second state file exists", secondFile.exists(), equalTo(true))
+            assertThat("first state file was deleted", firstFile.exists(), equalTo(false))
+        }
+
+    @Test
+    fun `restored multiselect state file is deleted when superseded`() {
+        val handle = SavedStateHandle()
+        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
+            selectRowAtPosition(1)
+            // Simulate the saved-state provider saving its bundle.
+            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
+        }
+
+        val restoredFile = handle.multiselectStateFile!!
+        runViewModelTest(savedStateHandle = handle, initMode = InitMode.NO_DELAY) {
+            assertThat("row is selected after restore", selectedRows, hasSize(1))
+
+            val newFile = generateExpensiveSavedState().multiselectStateFile!!
+            assertThat("new state file exists", newFile.exists(), equalTo(true))
+            assertThat("restored state file was deleted", restoredFile.exists(), equalTo(false))
+        }
+    }
+
+    @Test
+    fun `saving multiselect state recreates an evicted snapshot directory`() {
+        val directory = File(createTransientDirectory(), "idsfiles").apply { mkdirs() }
+        runViewModelTest(notes = 2, initMode = InitMode.NO_DELAY, cacheDir = directory) {
+            selectRowAtPosition(1)
+            generateExpensiveSavedState()
+            assertTrue(directory.deleteRecursively())
+
+            val replacement = assertNotNull(generateExpensiveSavedState().multiselectStateFile)
+
+            assertEquals(selectedRows.map { it.cardOrNoteId }, replacement.getIdsOrNull())
+        }
+    }
+
+    @Test
+    fun `failed replacement preserves restored multiselect state file`() {
+        val handle = SavedStateHandle()
+        runViewModelTest(savedStateHandle = handle, notes = 2, initMode = InitMode.NO_DELAY) {
+            selectRowAtPosition(1)
+            handle[STATE_MULTISELECT_VALUES] = generateExpensiveSavedState()
+        }
+        val restoredFile = assertNotNull(handle.multiselectStateFile)
+        val savedIds = assertNotNull(restoredFile.getIdsOrNull())
+
+        // A file at the directory path prevents replacement without affecting the old snapshot.
+        runViewModelTest(
+            savedStateHandle = handle,
+            initMode = InitMode.NO_DELAY,
+            cacheDir = File(createTransientDirectory(), "blocked").apply { writeText("occupied") },
+        ) {
+            assertThat("selection is restored", selectedRows, hasSize(1))
+            assertFailsWith<IOException> { generateExpensiveSavedState() }
+            assertThat("previous snapshot remains readable", restoredFile.getIdsOrNull(), equalTo(savedIds))
+        }
+    }
+
+    @Test
+    fun `multiselect state file is deleted when an empty selection is saved`() =
+        runViewModelTest(notes = 2, initMode = InitMode.NO_DELAY) {
+            selectRowAtPosition(1)
+            val file = generateExpensiveSavedState().multiselectStateFile!!
+            endMultiSelectMode(SingleSelectCause.NavigateBack)
+
+            assertNull(generateExpensiveSavedState().multiselectStateFile)
+            assertThat("previous state file was deleted", file.exists(), equalTo(false))
+        }
 }
 
 context(test: AnkiTest)
@@ -2404,8 +2374,9 @@ private fun runViewModelTest(
     val viewModel =
         CardBrowserViewModel(
             lastDeckIdRepository = SharedPreferencesLastDeckIdRepository(),
-            cacheDir = createTransientDirectory(),
+            idsFileDirectory = createTransientDirectory(),
             options = null,
+            initialDeckId = null,
             preferences = AnkiDroidApp.sharedPreferencesProvider,
             isFragmented = false,
             manualInit = manualInit,
@@ -2611,8 +2582,9 @@ fun createCardBrowserViewModel(manualInit: Boolean = true): CardBrowserViewModel
     val viewModel =
         CardBrowserViewModel(
             lastDeckIdRepository = SharedPreferencesLastDeckIdRepository(),
-            cacheDir = createTransientDirectory(),
+            idsFileDirectory = createTransientDirectory(),
             options = null,
+            initialDeckId = null,
             preferences = AnkiDroidApp.sharedPreferencesProvider,
             isFragmented = false,
             manualInit = manualInit,

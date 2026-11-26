@@ -6,6 +6,20 @@ package com.ichi2.anki.shareddeck
 
 import android.text.format.DateUtils
 import android.text.format.Formatter
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.SpringSpec
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,9 +56,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -63,12 +81,30 @@ import com.ichi2.anki.CommonString
 import com.ichi2.anki.R
 import com.ichi2.compose.theme.AnkiDroidTheme
 import com.ichi2.compose.theme.dimensions
+import com.ichi2.compose.theme.widgetBorder
 import com.ichi2.compose.ui.preview.ThemePreviews
 
 private val MaxContentWidth = 600.dp
 private val ProgressRingSize = 240.dp
 private val ProgressRingStroke = 10.dp
 private val InfoBadgeSize = 28.dp
+private val ProgressAnimationSpec =
+    SpringSpec(
+        dampingRatio = Spring.DampingRatioLowBouncy,
+        stiffness = Spring.StiffnessMediumLow,
+        visibilityThreshold = 1 / 1000f,
+    )
+private val PercentTextAnimationSpec =
+    SpringSpec(
+        dampingRatio = Spring.DampingRatioNoBouncy,
+        stiffness = Spring.StiffnessMediumLow,
+        visibilityThreshold = 1 / 1000f,
+    )
+private const val RING_ENTER_MILLIS = 300
+private const val RING_ENTER_DELAY_MILLIS = 100
+private const val RING_EXIT_MILLIS = 150
+private const val RING_ENTER_INITIAL_SCALE = 0.92f
+private const val RING_EXIT_TARGET_SCALE = 0.8f
 
 /** Stateless download screen. State lives in [SharedDecksDownloadViewModel]. */
 @Composable
@@ -78,6 +114,7 @@ fun SharedDecksDownloadScreen(
     onImportClick: () -> Unit,
     onTryAgainClick: () -> Unit,
     onOpenInBrowserClick: () -> Unit,
+    animationsEnabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val insets = WindowInsets.systemBars.union(WindowInsets.displayCutout)
@@ -85,6 +122,7 @@ fun SharedDecksDownloadScreen(
         modifier =
             modifier
                 .fillMaxSize()
+                .pointerInput(Unit) {}
                 .windowInsetsPadding(insets.only(WindowInsetsSides.Top))
                 .background(MaterialTheme.colorScheme.background)
                 .windowInsetsPadding(insets.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)),
@@ -102,6 +140,7 @@ fun SharedDecksDownloadScreen(
             Spacer(Modifier.weight(1f))
             ProgressRing(
                 state = state,
+                animationsEnabled = animationsEnabled,
                 modifier = Modifier.padding(vertical = MaterialTheme.dimensions.screenEdge),
             )
             Spacer(Modifier.weight(1f))
@@ -131,39 +170,112 @@ private fun Header(fileName: String?) {
     )
 }
 
-/** Progress ring with the percentage and size in the middle. */
+/** A spinning ring until the first bytes arrive, then the ring with the progress in it. */
 @Composable
 private fun ProgressRing(
     state: SharedDecksDownloadUiState,
+    animationsEnabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        val percent = state.percent
-        if (percent == null) {
+    val targetProgress = ((state.percent ?: 0f) / 100f).coerceIn(0f, 1f)
+    val progressSpec: AnimationSpec<Float> = if (animationsEnabled) ProgressAnimationSpec else snap()
+    val percentSpec: AnimationSpec<Float> = if (animationsEnabled) PercentTextAnimationSpec else snap()
+    val animatedProgress by animateFloatAsState(
+        targetValue = targetProgress,
+        animationSpec = progressSpec,
+        label = "DownloadProgress",
+    )
+    val animatedPercent by animateFloatAsState(
+        targetValue = targetProgress * 100f,
+        animationSpec = percentSpec,
+        label = "DownloadPercentText",
+    )
+
+    AnimatedContent(
+        targetState = state,
+        modifier = modifier.fillMaxWidth(),
+        transitionSpec = {
+            if (animationsEnabled) {
+                val enter =
+                    fadeIn(tween(RING_ENTER_MILLIS, RING_ENTER_DELAY_MILLIS)) +
+                        scaleIn(tween(RING_ENTER_MILLIS, RING_ENTER_DELAY_MILLIS), initialScale = RING_ENTER_INITIAL_SCALE)
+                val exit =
+                    fadeOut(tween(RING_EXIT_MILLIS)) +
+                        scaleOut(tween(RING_EXIT_MILLIS), targetScale = RING_EXIT_TARGET_SCALE)
+                enter togetherWith exit
+            } else {
+                EnterTransition.None togetherWith ExitTransition.None
+            }
+        },
+        contentAlignment = Alignment.Center,
+        label = "DownloadRingContent",
+        contentKey = { it.isWaitingToStart },
+    ) { shownState ->
+        RingWithProgress(
+            state = shownState,
+            spinWhileWaiting = animationsEnabled && !shownState.isWaitingForNetwork,
+            progress = { animatedProgress },
+            percent = { animatedPercent },
+        )
+    }
+}
+
+/**
+ * Progress ring with the percentage and size in the middle.
+ *
+ * @param spinWhileWaiting whether the ring spins before the first bytes arrive, rather than sitting empty
+ */
+@Composable
+private fun RingWithProgress(
+    state: SharedDecksDownloadUiState,
+    spinWhileWaiting: Boolean,
+    progress: () -> Float,
+    percent: () -> Float,
+) {
+    val border = MaterialTheme.widgetBorder
+    val colors = MaterialTheme.colorScheme
+    val trackColor = if (border != null) colors.surface else colors.surfaceVariant
+    val sizeTextColor = if (border != null) colors.onSurface else colors.onSurfaceVariant
+    val indicatorModifier =
+        Modifier.size(ProgressRingSize).drawWithContent {
+            drawContent()
+            if (border != null) {
+                // The thin outline distinguishes the track from the thicker progress arc.
+                drawCircle(
+                    brush = border.brush,
+                    radius = (size.minDimension - ProgressRingStroke.toPx()) / 2,
+                    style = Stroke(width = border.width.toPx()),
+                )
+            }
+        }
+
+    Box(contentAlignment = Alignment.Center) {
+        if (state.percent == null || (state.isWaitingToStart && spinWhileWaiting)) {
             CircularProgressIndicator(
-                modifier = Modifier.size(ProgressRingSize),
+                modifier = indicatorModifier,
                 strokeWidth = ProgressRingStroke,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                trackColor = trackColor,
             )
         } else {
             CircularProgressIndicator(
-                progress = { (percent / 100f).coerceIn(0f, 1f) },
-                modifier = Modifier.size(ProgressRingSize),
+                progress = progress,
+                modifier = indicatorModifier,
                 strokeWidth = ProgressRingStroke,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                trackColor = trackColor,
             )
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             when {
                 state.phase == DownloadPhase.Failed -> RingLabel(stringResource(CommonString.download_failed))
-                percent == null -> RingLabel(TR.syncDownloadingFromAnkiweb())
+                state.percent == null -> RingLabel(TR.syncDownloadingFromAnkiweb())
+                state.isWaitingToStart -> Unit
                 else -> {
-                    PercentageText(percent)
+                    PercentageText(percent())
                     downloadSizeText(state.downloadedBytes, state.totalBytes)?.let {
                         Text(
                             text = it,
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = sizeTextColor,
                             modifier = Modifier.padding(top = MaterialTheme.dimensions.space50),
                         )
                     }
@@ -189,8 +301,8 @@ private fun RingLabel(text: String) {
 /** The percentage in the ring, with a smaller % sign. */
 @Composable
 private fun PercentageText(percent: Float) {
-    val text = stringResource(CommonString.percentage, formatDownloadPercent(percent))
     val style = MaterialTheme.typography.displayLarge
+    val text = stringResource(CommonString.percentage, formatDownloadPercent(percent))
     val sign = text.indexOf('%')
     Text(
         text =
@@ -329,12 +441,29 @@ private fun TonalCard(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = modifier,
-        content = content,
-    )
+    val border = MaterialTheme.widgetBorder
+    val colors = MaterialTheme.colorScheme
+    // Outlined e-ink cards use white surfaces and black content without changing the app palette.
+    val cardColors =
+        if (border != null) {
+            colors.copy(
+                surfaceVariant = colors.surface,
+                onSurfaceVariant = colors.onSurface,
+                tertiary = colors.onSurface,
+                onTertiary = colors.surface,
+            )
+        } else {
+            colors
+        }
+    MaterialTheme(colorScheme = cardColors) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+            border = border,
+            modifier = modifier,
+            content = content,
+        )
+    }
 }
 
 /** Warning shown while the download waits for a network connection. */
@@ -364,6 +493,8 @@ private fun Actions(
     onOpenInBrowserClick: () -> Unit,
 ) {
     val dimensions = MaterialTheme.dimensions
+    val border = MaterialTheme.widgetBorder
+    val colors = MaterialTheme.colorScheme
     FlowRow(
         modifier =
             Modifier
@@ -373,13 +504,15 @@ private fun Actions(
         verticalArrangement = Arrangement.spacedBy(dimensions.space100),
     ) {
         when (phase) {
-            DownloadPhase.Downloading ->
+            // transient: the fragment shows the login prompt and leaves this screen
+            DownloadPhase.Downloading, DownloadPhase.LoginRequired ->
                 FilledTonalButton(
                     onClick = onCancelClick,
+                    border = border,
                     colors =
                         ButtonDefaults.filledTonalButtonColors(
-                            containerColor = MaterialTheme.colorScheme.errorContainer,
-                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                            containerColor = if (border != null) colors.surface else colors.errorContainer,
+                            contentColor = if (border != null) colors.onSurface else colors.onErrorContainer,
                         ),
                 ) {
                     Text(stringResource(CommonString.cancel_download))
@@ -389,7 +522,10 @@ private fun Actions(
                     Text(stringResource(CommonString.import_deck))
                 }
             DownloadPhase.Failed -> {
-                FilledTonalButton(onClick = onTryAgainClick) {
+                FilledTonalButton(
+                    onClick = onTryAgainClick,
+                    border = border,
+                ) {
                     Text(stringResource(CommonString.try_again))
                 }
                 TextButton(onClick = onOpenInBrowserClick) {
@@ -413,6 +549,7 @@ private class DownloadStateProvider : PreviewParameterProvider<SharedDecksDownlo
 
     override val values =
         sequenceOf(
+            SharedDecksDownloadUiState(fileName = downloading.fileName),
             downloading,
             downloading.copy(isWaitingForNetwork = true),
             downloading.copy(phase = DownloadPhase.Complete, percent = 100f, downloadedBytes = 44_900_000),
@@ -432,6 +569,7 @@ private fun SharedDecksDownloadScreenPreview(
             onImportClick = {},
             onTryAgainClick = {},
             onOpenInBrowserClick = {},
+            animationsEnabled = true,
         )
     }
 }

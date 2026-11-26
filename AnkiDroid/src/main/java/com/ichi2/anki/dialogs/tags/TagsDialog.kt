@@ -20,7 +20,6 @@ import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.SearchView
 import androidx.appcompat.widget.Toolbar
-import androidx.core.content.ContextCompat
 import androidx.core.os.BundleCompat
 import androidx.core.view.isVisible
 import androidx.core.widget.doAfterTextChanged
@@ -29,7 +28,6 @@ import androidx.lifecycle.flowWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.ichi2.anki.CollectionManager.TR
 import com.ichi2.anki.CommonString
@@ -37,7 +35,7 @@ import com.ichi2.anki.OnContextAndLongClickListener
 import com.ichi2.anki.R
 import com.ichi2.anki.analytics.AnalyticsDialogFragment
 import com.ichi2.anki.browser.IdsFile
-import com.ichi2.anki.common.annotations.NeedsTest
+import com.ichi2.anki.common.utils.android.getColorFromAttr
 import com.ichi2.anki.common.utils.android.showThemedToast
 import com.ichi2.anki.databinding.DialogTagsBinding
 import com.ichi2.anki.launchCatchingTask
@@ -45,6 +43,7 @@ import com.ichi2.anki.libanki.NoteId
 import com.ichi2.anki.libanki.withCollapsedWhitespace
 import com.ichi2.anki.model.CardStateFilter
 import com.ichi2.anki.snackbar.showSnackbar
+import com.ichi2.anki.ui.StableScrollbarLayoutManager
 import com.ichi2.anki.utils.ext.requireParcelable
 import com.ichi2.ui.AccessibleSearchView
 import com.ichi2.utils.DisplayUtils.setDialogKeyboardResize
@@ -66,6 +65,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.parcelize.Parcelize
 import timber.log.Timber
 import java.io.IOException
+import kotlin.time.Duration.Companion.milliseconds
+import com.ichi2.anki.common.android.R as CommonR
 
 class TagsDialog : AnalyticsDialogFragment {
     /**
@@ -90,8 +91,8 @@ class TagsDialog : AnalyticsDialogFragment {
     internal lateinit var binding: DialogTagsBinding
         private set
 
-    private var type: DialogType? = null
-    internal val isEditingTags: Boolean get() = type == DialogType.EDIT_TAGS
+    internal var type: DialogType? = null
+        private set
     private var tagsArrayAdapter: TagsArrayAdapter? = null
     private var toolbarSearchView: AccessibleSearchView? = null
     private var toolbarSearchItem: MenuItem? = null
@@ -104,7 +105,7 @@ class TagsDialog : AnalyticsDialogFragment {
         viewModelFactory {
             initializer {
                 val idsFile = requireArguments().requireParcelable<IdsFile>(ARG_TAGS_FILE)
-                val noteIds = idsFile.getIds()
+                val noteIds = idsFile.getIdsOrNull() ?: throw IOException("Tag selection is no longer available")
                 val checkedTags =
                     requireNotNull(requireArguments().getStringArrayList(ARG_CHECKED_TAGS)) {
                         "$ARG_CHECKED_TAGS is required"
@@ -149,7 +150,7 @@ class TagsDialog : AnalyticsDialogFragment {
         checkedTags: ArrayList<String> = arrayListOf(),
     ): TagsDialog {
         // TODO: checkedTags is unbounded and could exceed the bundle size
-        val file = IdsFile(context.cacheDir, noteIds)
+        val file = IdsFile(IdsFile.getDirectory(), noteIds, IdsFile.Purpose.TAGS)
         arguments = this.arguments ?: Bundle().apply {
             putParcelable(ARG_TAGS_FILE, file)
             putParcelable(ARG_DIALOG_TYPE, type)
@@ -170,10 +171,6 @@ class TagsDialog : AnalyticsDialogFragment {
             listener
                 ?: TagsDialogListener.createFragmentResultSender(parentFragmentManager)
 
-    @NeedsTest(
-        "In EDIT_TAGS dialog, long-clicking a tag should open the add tag dialog with the clicked tag" +
-            " filled as prefix properly. In other dialog types, long-clicking a tag behaves like a short click.",
-    )
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         // Resolve the selection before creating any controls that could submit an operation.
         try {
@@ -193,7 +190,7 @@ class TagsDialog : AnalyticsDialogFragment {
                 getString(CommonString.select)
             }
 
-        val tagsListLayout: RecyclerView.LayoutManager = LinearLayoutManager(requireContext())
+        val tagsListLayout: RecyclerView.LayoutManager = StableScrollbarLayoutManager(requireContext())
         binding.tagsList.apply {
             requestFocus()
             layoutManager = tagsListLayout
@@ -223,7 +220,7 @@ class TagsDialog : AnalyticsDialogFragment {
         lifecycleScope.launch {
             val showProgressJob =
                 launch {
-                    delay(600)
+                    delay(600.milliseconds)
                     withContext(Dispatchers.Main) {
                         binding.loadingContainer.visibility = View.VISIBLE
                         viewModel.initProgress
@@ -329,9 +326,7 @@ class TagsDialog : AnalyticsDialogFragment {
         toolbar.setTitle(titleRes)
 
         val toolbarAddItem = toolbar.menu.findItem(R.id.tags_dialog_action_add)
-        val drawable = ContextCompat.getDrawable(requireContext(), R.drawable.ic_add)
-        drawable?.setTint(requireContext().getColor(R.color.white))
-        toolbarAddItem.icon = drawable
+        toolbarAddItem.icon?.mutate()?.setTint(getColorFromAttr(toolbar.context, CommonR.attr.actionBarTextColor))
 
         toolbarAddItem.setOnMenuItemClickListener {
             val query = toolbarSearchView!!.query.toString()
@@ -386,9 +381,6 @@ class TagsDialog : AnalyticsDialogFragment {
      *
      * @param prefixTag: The tag to be prefilled into the EditText section. A trailing '::' will be appended.
      */
-    @NeedsTest("The prefixTag should be prefilled properly")
-    @NeedsTest("Entering an existing tag should show an error and disable the OK button")
-    @NeedsTest("Entering a new valid tag should clear the error and enable the OK button")
     private fun createAddTagDialog(prefixTag: String?) {
         val addTagDialog =
             AlertDialog
@@ -397,7 +389,7 @@ class TagsDialog : AnalyticsDialogFragment {
                     title(text = getString(CommonString.add_tag))
                     positiveButton(CommonString.menu_add)
                     negativeButton(CommonString.dialog_cancel)
-                    setView(R.layout.dialog_generic_text_input)
+                    setView(CommonR.layout.dialog_generic_text_input)
                 }.input(
                     hint = TR.actionsName().dropLastWhile { it == ':' },
                     inputType = InputType.TYPE_CLASS_TEXT,

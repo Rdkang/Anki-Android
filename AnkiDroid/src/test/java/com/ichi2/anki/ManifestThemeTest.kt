@@ -6,11 +6,16 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ichi2.anki.compat.CompatHelper.Companion.getPackageInfoCompat
 import com.ichi2.anki.compat.GET_ACTIVITIES_L
 import com.ichi2.anki.compat.PackageInfoFlagsCompat
+import com.ichi2.testutils.AndroidTest
+import com.ichi2.testutils.EmptyApplication
+import com.ichi2.testutils.targetContext
 import com.ichi2.themes.Themes
 import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.empty
 import org.junit.Test
+import org.junit.experimental.categories.Category
 import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
 
 /**
  * [Themes.setTheme] applies the user's theme in `onCreate`, so activities should not set
@@ -21,7 +26,9 @@ import org.junit.runner.RunWith
  *   the stale background is then visible behind transparent content
  */
 @RunWith(AndroidJUnit4::class)
-class ManifestThemeTest : RobolectricTest() {
+@Config(application = EmptyApplication::class)
+@Category(EmptyApplicationCategory::class)
+class ManifestThemeTest : AndroidTest {
     /**
      * Manifest themes which are intentional. Additions to this list should explain why the
      * activity cannot use the application theme.
@@ -29,10 +36,10 @@ class ManifestThemeTest : RobolectricTest() {
     private val allowedThemes: Map<String, Int> =
         mapOf(
             // launcher splash background; replaced by Themes.setTheme (`hadLauncherSplash`)
-            "com.ichi2.anki.DeckPicker" to R.style.Theme_Dark_Launcher,
-            "com.ichi2.anki.CardBrowser" to R.style.Theme_Dark_Launcher,
-            "com.ichi2.anki.Reviewer" to R.style.Theme_Dark_Launcher,
-            "com.ichi2.anki.IntentHandler2" to R.style.Theme_Dark_Launcher,
+            "com.ichi2.anki.DeckPicker" to R.style.Theme_AnkiDroid_Launcher,
+            "com.ichi2.anki.CardBrowser" to R.style.Theme_AnkiDroid_Launcher,
+            "com.ichi2.anki.Reviewer" to R.style.Theme_AnkiDroid_Launcher,
+            "com.ichi2.anki.IntentHandler2" to R.style.Theme_AnkiDroid_Launcher,
             // invisible trampoline: forwards intents without showing UI
             "com.ichi2.anki.IntentHandler" to android.R.style.Theme_Translucent_NoTitleBar,
             // ACRA crash report dialog

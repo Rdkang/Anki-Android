@@ -6,7 +6,8 @@ on:
 
 jobs:
   merge_job:
-    if: github.event.pull_request.merged == true
+    # Maintains ankidroid/Anki-Android's own issues and PRs; do nothing on forks
+    if: github.event.pull_request.merged == true && github.repository == 'ankidroid/Anki-Android'
     permissions:
       contents: read
       pull-requests: write
@@ -14,6 +15,7 @@ jobs:
     steps:
     - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
+        retries: 3
         script: |
           let removeLabelsList = [
             "Pending Merge", 
@@ -42,6 +44,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
+              request: { retries: 0 },
               body: `Maintainers: Please [Sync Translations](https://github.com/ankidroid/Anki-Android/actions/workflows/sync_translations.yml) to produce a commit with only the automated changes from this PR.
               
           Read more about updating strings on the wiki,
@@ -72,7 +75,7 @@ jobs:
           }
 
   add_label:
-    if: (!(github.event.action == 'closed' && github.event.pull_request.merged != true)) && github.event.pull_request.merged != true && github.event.pull_request.head.ref != 'i18n_sync'
+    if: ((!(github.event.action == 'closed' && github.event.pull_request.merged != true)) && github.event.pull_request.merged != true && github.event.pull_request.head.ref != 'i18n_sync') && github.repository == 'ankidroid/Anki-Android'
     permissions:
       contents: read
       pull-requests: write
@@ -80,6 +83,7 @@ jobs:
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
+          retries: 3
           script: |
             const I18N_FILES = [
                 "01-core",
@@ -133,6 +137,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
+                request: { retries: 0 },
                 body: `> [!IMPORTANT]
             > **Maintainers**: This PR contains https://github.com/ankidroid/Anki-Android/labels/Strings changes
             
@@ -161,7 +166,7 @@ jobs:
               return false;
             }
 
-            const changedFiles = await github.rest.pulls.listFiles({
+            const changedFiles = await github.paginate(github.rest.pulls.listFiles, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number,
@@ -171,7 +176,7 @@ jobs:
             // set boolean to true and use the boolean in outer loop to add label
             let fileChanged = false;
             const pullRequestData = await getPullRequest();
-            for (let files of changedFiles.data) {
+            for (let files of changedFiles) {
               for (let i18n of I18N_FILES) {
                 if (files.filename.includes(i18n)) {
                   fileChanged = true;
@@ -199,7 +204,7 @@ jobs:
             }
 
   add_new_contributor_label:
-    if: github.event.action == 'opened'
+    if: github.event.action == 'opened' && github.repository == 'ankidroid/Anki-Android'
     permissions:
       contents: read
       pull-requests: write
@@ -207,6 +212,7 @@ jobs:
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
+          retries: 3
           script: |
             const creator = context.payload.sender.login
             const opts = github.rest.issues.listForRepo.endpoint.merge({
@@ -232,7 +238,7 @@ jobs:
   
   # Add 'Needs Review' label to newly opened, non-draft PRs
   add_needs_review_label:
-    if: github.event.action == 'opened' && !github.event.pull_request.draft
+    if: (github.event.action == 'opened' && !github.event.pull_request.draft) && github.repository == 'ankidroid/Anki-Android'
     permissions:
       contents: read
       pull-requests: write
@@ -240,6 +246,7 @@ jobs:
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
+          retries: 3
           script: |
             await github.rest.issues.addLabels({
               issue_number: context.issue.number,

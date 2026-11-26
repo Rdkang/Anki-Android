@@ -89,6 +89,9 @@ object SentenceCase {
     val checkMediaAction get() = TR.mediaCheckCheckMediaAction().toSentenceCase(R.string.sentence_check_media)
 
     context(_: Context)
+    val clearUnusedTags get() = TR.browsingClearUnusedTags().toSentenceCase(R.string.sentence_clear_unused_tags)
+
+    context(_: Context)
     val customStudy get() = TR.actionsCustomStudy().toSentenceCase(R.string.sentence_custom_study)
 
     context(_: Fragment)
@@ -377,6 +380,8 @@ object SentenceCase {
  * 'Sentence case' strings.
  *
  * Sentence case is a material design guideline
+ *
+ * NOTE: in composable code use [trCase] extension.
  */
 @Suppress("UnusedReceiverParameter")
 val GeneratedTranslations.sentenceCase get() = SentenceCase

@@ -2,20 +2,17 @@
 
 package com.ichi2.anki.browser.search
 
-import androidx.test.ext.junit.runners.AndroidJUnit4
 import anki.search.SearchNode
 import anki.search.searchNode
 import com.ichi2.anki.libanki.exception.InvalidSearchException
 import com.ichi2.anki.libanki.testutils.AnkiTest
 import com.ichi2.testutils.JvmTest
 import org.junit.Test
-import org.junit.runner.RunWith
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
 /** Tests for [SearchString] */
-@RunWith(AndroidJUnit4::class)
 class SearchStringTest : JvmTest() {
     @Test
     fun `valid searchString from string`() {
@@ -30,6 +27,16 @@ class SearchStringTest : JvmTest() {
         val ex = assertFailsWith<InvalidSearchException> { result.getOrThrow() }
         // Invalid search: an `and` was found but it is not connecting two search terms.
         assertContains(ex.message!!, "not connecting two search terms")
+    }
+
+    @Test
+    fun `a non-breaking space before OR is read as a space`() {
+        val noteIds = listOf("t1", "t2", "t3").map { tag -> addBasicNote().update { tags = mutableListOf(tag) }.id }
+
+        val search = fromUserInput("(tag:t3 OR tag:t2\u00a0OR tag:t1)").getOrThrow()
+
+        assertEquals("tag:t3 OR tag:t2 OR tag:t1", search.value)
+        assertEquals(noteIds.toSet(), col.findNotes(search).toSet())
     }
 
     @Test

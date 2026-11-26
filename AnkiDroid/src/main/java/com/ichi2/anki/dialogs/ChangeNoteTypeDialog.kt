@@ -31,7 +31,9 @@ import androidx.core.view.WindowInsetsCompat.Type.systemBars
 import androidx.core.view.doOnNextLayout
 import androidx.core.view.isVisible
 import androidx.core.view.updateLayoutParams
+import androidx.core.widget.TextViewCompat
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.viewpager2.adapter.FragmentStateAdapter
@@ -41,18 +43,18 @@ import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.tabs.TabLayout
 import com.google.android.material.tabs.TabLayoutMediator
 import com.google.android.material.textview.MaterialTextView
-import com.ichi2.anki.AnkiActivity
 import com.ichi2.anki.CollectionManager.TR
 import com.ichi2.anki.CommonString
 import com.ichi2.anki.CrashReportData.Companion.toCrashReportData
 import com.ichi2.anki.R
 import com.ichi2.anki.analytics.AnalyticsDialogFragment
 import com.ichi2.anki.common.annotations.NeedsTest
+import com.ichi2.anki.common.utils.android.getResFromAttr
 import com.ichi2.anki.compat.setTooltipTextCompat
 import com.ichi2.anki.databinding.DialogChangeNoteTypeBinding
 import com.ichi2.anki.databinding.DialogFieldsBinding
 import com.ichi2.anki.databinding.DialogTemplatesBinding
-import com.ichi2.anki.databinding.ViewTabLayoutIconOnEndBinding
+import com.ichi2.anki.databinding.ViewTabLayoutIconOnStartBinding
 import com.ichi2.anki.dialogs.ConversionType.CLOZE_TO_CLOZE
 import com.ichi2.anki.dialogs.ConversionType.CLOZE_TO_REGULAR
 import com.ichi2.anki.dialogs.ConversionType.REGULAR_TO_CLOZE
@@ -60,14 +62,13 @@ import com.ichi2.anki.dialogs.ConversionType.REGULAR_TO_REGULAR
 import com.ichi2.anki.launchCatchingTask
 import com.ichi2.anki.libanki.NoteId
 import com.ichi2.anki.libanki.NoteTypeId
-import com.ichi2.anki.requireAnkiActivity
 import com.ichi2.anki.showError
 import com.ichi2.anki.snackbar.showSnackbar
 import com.ichi2.anki.sync.launchCatchingRequiringOneWaySync
 import com.ichi2.anki.ui.BasicItemSelectedListener
 import com.ichi2.anki.ui.internationalization.sentenceCase
 import com.ichi2.anki.utils.InitStatus
-import com.ichi2.anki.utils.ext.launchCollectionInLifecycleScope
+import com.ichi2.anki.utils.ext.collectInLifecycle
 import com.ichi2.anki.withProgress
 import com.ichi2.themes.Themes
 import com.ichi2.utils.LanguageUtil
@@ -75,6 +76,7 @@ import com.ichi2.utils.boldList
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import com.ichi2.anki.common.android.R as CommonR
 
 /**
  * Supports bulk remapping of notes a different note type, remapping fields and templates
@@ -115,7 +117,7 @@ class ChangeNoteTypeDialog : AnalyticsDialogFragment(R.layout.dialog_change_note
         binding.toolbar.title = TR.sentenceCase.changeNoteType
         binding.toolbar.setNavigationOnClickListener { dismiss() }
         binding.btnSave.setOnClickListener {
-            requireAnkiActivity().changeNoteType(viewModel)
+            requireActivity().changeNoteType(viewModel)
             // dismiss() is handled via closeDialogFlow
         }
 
@@ -175,7 +177,7 @@ class ChangeNoteTypeDialog : AnalyticsDialogFragment(R.layout.dialog_change_note
     private fun bindSaveButtonState(binding: DialogChangeNoteTypeBinding) {
         // disabled by default until hasChangesFlow emits true
         binding.btnSave.isEnabled = false
-        viewModel.hasChangesFlow.launchCollectionInLifecycleScope {
+        viewModel.hasChangesFlow.collectInLifecycle {
             binding.btnSave.isEnabled = it
         }
     }
@@ -209,7 +211,7 @@ class ChangeNoteTypeDialog : AnalyticsDialogFragment(R.layout.dialog_change_note
             android.R.layout.simple_spinner_dropdown_item,
             noteTypes,
         ) {
-            var clozeColor = MaterialColors.getColor(context, R.attr.clozeColor, Color.BLUE)
+            var clozeColor = MaterialColors.getColor(context, CommonR.attr.clozeColor, Color.BLUE)
 
             private val defaultViewTextColor: Int by lazy {
                 (super.getView(0, null, Spinner(context)) as CheckedTextView).currentTextColor
@@ -302,7 +304,7 @@ class ChangeNoteTypeDialog : AnalyticsDialogFragment(R.layout.dialog_change_note
         viewPager: ViewPager2,
     ): TabLayoutMediator =
         TabLayoutMediator(tabLayout, viewPager) { tab: TabLayout.Tab, position: Int ->
-            val binding = ViewTabLayoutIconOnEndBinding.inflate(LayoutInflater.from(tabLayout.context), tabLayout, false)
+            val binding = ViewTabLayoutIconOnStartBinding.inflate(LayoutInflater.from(tabLayout.context), tabLayout, false)
             when (position) {
                 0 -> {
                     binding.tabIcon.setImageResource(R.drawable.ic_mode_edit_white)
@@ -683,6 +685,9 @@ private fun createMappingRow(
     addView(
         MaterialTextView(context).apply {
             layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            val themeTextColors = textColors
+            TextViewCompat.setTextAppearance(this, getResFromAttr(context, com.google.android.material.R.attr.textAppearanceBodyLarge))
+            setTextColor(themeTextColors)
             text = label
             textAlignment = View.TEXT_ALIGNMENT_CENTER
         },
@@ -692,7 +697,7 @@ private fun createMappingRow(
 /**
  * Changes note type of multiple notes, displaying a message on success
  */
-private fun AnkiActivity.changeNoteType(viewModel: ChangeNoteTypeViewModel) =
+private fun FragmentActivity.changeNoteType(viewModel: ChangeNoteTypeViewModel) =
     this.launchCatchingRequiringOneWaySync {
         try {
             val notesUpdated =

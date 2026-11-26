@@ -1,9 +1,13 @@
-// Keep the existing AGP variant/task APIs until the separate AGP DSL migration.
+// Keep the existing AGP DSL/task APIs until the separate AGP DSL migration.
 @file:Suppress("DEPRECATION")
 
+import com.android.build.api.variant.FilterConfiguration.FilterType
 import com.ichi2.anki.gradle.VersionCodeTasks
 import com.ichi2.anki.gradle.WriteReleaseMetadata
+import com.ichi2.anki.gradle.isCoverageEnabled
 import java.io.ByteArrayOutputStream
+import java.time.LocalDate
+import java.time.ZoneId
 import java.util.Locale
 import java.util.Properties
 import java.util.regex.Pattern
@@ -12,12 +16,13 @@ plugins {
     // Gradle plugin portal
     alias(libs.plugins.tripletPlay)
     id("ankidroid.android.app")
+    id("ankidroid.android.compose")
     id("ankidroid.plugins.jacoco")
+    id("ankidroid.plugins.robolectric-downloader")
     alias(libs.plugins.androidx.baselineprofile)
     alias(libs.plugins.kotlin.serialization)
-    alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.keeper)
-    alias(libs.plugins.roborazzi)
+    id("ankidroid.plugins.screenshots")
     id("idea")
 }
 
@@ -37,7 +42,7 @@ keeper {
 baselineProfile {
     // Write generated profiles to `src/main/baselineProfiles/` instead of the
     // default per-variant `src/playRelease/generated/baselineProfiles/`. This
-    // ensures the profile is consumed by ALL variants (play, amazon, full) and
+    // ensures the profile is consumed by ALL variants (play, full) and
     // ALL buildTypes (release, benchmark), not just `playRelease`.
     mergeIntoMain = true
 }
@@ -70,15 +75,23 @@ val gitCommitHash =
 /**
  * Epoch millis of the build. Displayed on the 'About' screen.
  *
- * CI passes the real time via -PbuildTime=<epoch> # example: 1776422957
+ * CI passes the real time via -PbuildTime=<epoch> # example: 1776422957000
  *
- * A local build uses a stale value (captured in the configuration cache) so the configuration cache
- * is not invalidated on every build.
+ * This value is captured in the configuration cache, so it can be stale when the cache is reused.
  */
 val buildTimeMillis =
     providers
         .gradleProperty("buildTime")
-        .orElse(providers.provider { System.currentTimeMillis().toString() })
+        .orElse(
+            providers.provider {
+                LocalDate
+                    .now()
+                    .atStartOfDay(ZoneId.systemDefault())
+                    .toInstant()
+                    .toEpochMilli()
+                    .toString()
+            },
+        )
 
 android {
     namespace = "com.ichi2.anki"
@@ -88,7 +101,6 @@ android {
         aidl = true
         viewBinding = true
         resValues = true
-        compose = true
     }
 
     if (testReleaseBuild) {
@@ -130,9 +142,9 @@ android {
         //
         // This ensures the correct ordering between the various types of releases (dev < alpha < beta < release) which is
         // needed for upgrades to be offered correctly.
-        versionCode = 22600102
+        versionCode = 22600114
         // If you change this to a new version, you probably also want to update .gradle/workflows/milestone.yml for the new version...
-        versionName = "2.26.0alpha2"
+        versionName = "2.26.0alpha14"
         testApplicationId = "com.ichi2.anki.tests"
         vectorDrawables.useSupportLibrary = true
         testInstrumentationRunner = "com.ichi2.testutils.NewCollectionPathTestRunner"
@@ -188,12 +200,9 @@ android {
             splits.abi.isUniversalApk = true // Build universal APK for debug always
             // Check Crash Reports page on developer wiki for info on ACRA testing
             // buildConfigField "String", "ACRA_URL", '"https://918f7f55-f238-436c-b34f-c8b5f1331fe5-bluemix.cloudant.com/acra-ankidroid/_design/acra-storage/_update/report"'
+            val localProperties = Properties()
             if (project.rootProject.file("local.properties").exists()) {
-                val localProperties = Properties()
                 localProperties.load(project.rootProject.file("local.properties").inputStream())
-                // #6009 Allow optional disabling of JaCoCo for general build (assembleDebug).
-                // jacocoDebug task was slow, hung, and wasn't required unless I wanted coverage
-                isTestCoverageEnabled = localProperties["enable_coverage"] != "false"
                 // not profiled: optimization for build times
                 if (localProperties["enable_languages"] == "false") {
                     android.defaultConfig.resourceConfigurations += "en"
@@ -204,9 +213,11 @@ android {
                 } else {
                     buildConfigField("Boolean", "ENABLE_LEAK_CANARY", "true")
                 }
-            } else {
-                isTestCoverageEnabled = true
             }
+
+            // Issue 6009: allow disabling JaCoCo to speed up debug builds.
+            // A Gradle property also allows the preference to be shared across worktrees.
+            isTestCoverageEnabled = project.isCoverageEnabled()
 
             // make the icon red if in debug mode
             resValue("color", "anki_foreground_icon_color_0", "#FFFF0000")
@@ -242,9 +253,7 @@ android {
     }
 
     /*
-     * Product Flavors are used for Amazon App Store and Google Play Store.
-     * This is because we cannot use Camera Permissions in Amazon App Store (for FireTv etc...)
-     * Therefore, different AndroidManifest for Camera Permissions is used in Amazon flavor.
+     * Product Flavors are used for Google Play Store restrictions.
      */
     flavorDimensions += "appStore"
     productFlavors {
@@ -254,9 +263,6 @@ android {
             // Google Play no longer considers Open Collective to be acceptable for
             // a 'tax-exempt' link. Temporarily remove our links
             buildConfigField("Boolean", "SHOW_DONATE_LINKS", "false")
-        }
-        create("amazon") {
-            dimension = "appStore"
         }
         // A 'full' build has no restrictions on storage/camera. Distributed on GitHub/F-Droid
         create("full") {
@@ -297,44 +303,15 @@ android {
             }
         }
     }
-    // applicationVariants are e.g. debug, release
-    applicationVariants.configureEach {
-        val variant = this
-        // We want the same version stream for all ABIs in debug but for release we can split them
-        if (variant.buildType.name == "release") {
-            variant.outputs.configureEach {
-                val output = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
-
-                // For each separate APK per architecture, set a unique version code as described here:
-                // https://developer.android.com/studio/build/configure-apk-splits.html
-                val versionCodes = mapOf("armeabi-v7a" to 1, "x86" to 2, "arm64-v8a" to 3, "x86_64" to 4)
-                val outputFile = output.outputFile
-                if (outputFile != null && outputFile.name.endsWith(".apk")) {
-                    val abi = output.getFilter("ABI")
-                    if (abi != null) { // null for the universal-debug, universal-release variants
-                        //  From: https://developer.android.com/studio/publish/versioning#appversioning
-                        //  "Warning: The greatest value Google Play allows for versionCode is 2100000000"
-                        //  AnkiDroid versionCodes have a budget 8 digits (through AnkiDroid 9)
-                        //  This style does ABI version code ranges with the 9th digit as 0-4.
-                        //  This consumes ~20% of the version range space, w/50 years of versioning at our major-version pace
-                        output.versionCodeOverride =
-                            // ex:  321200106 = 3 * 100000000 + 21200106
-                            versionCodes.getValue(abi) * 100000000 + defaultConfig.versionCode!!
-                    }
-                }
-            }
-        }
-    }
-
     testOptions {
         animationsDisabled = true
         unitTests {
             all { test ->
+                // Profile coverage checks must rerun when the generated profiles change.
+                test.inputs.dir("src/main/generated/baselineProfiles")
                 test.useJUnitPlatform {
                     // ./gradlew testFullDebugUnitTest -Pscreenshot
                     if (project.hasProperty("screenshot")) {
-                        includeTags("com.ichi2.anki.ScreenshotTestCategory")
-
                         // ./gradlew :AnkiDroid:recordRoborazziPlayDebug -Pscreenshot -Ptheme=black -Pdevice=tablet,foldable
                         val theme = project.findProperty("theme")?.takeIf { it.toString().isNotEmpty() } ?: "light"
                         val device = project.findProperty("device")?.takeIf { it.toString().isNotEmpty() } ?: "phone"
@@ -352,13 +329,12 @@ android {
                                 )
                             }
                         }
-                        validateInput(theme, listOf("light", "plain", "dark", "black", "eink", "all"))
+                        validateInput(theme, listOf("light", "plain", "dark", "black", "eink", "eink_night", "all"))
                         validateInput(device, listOf("phone", "tablet", "foldable", "desktop", "all"))
 
                         test.systemProperty("screenshot.theme", theme)
                         test.systemProperty("screenshot.device", device)
-                    } else {
-                        excludeTags("com.ichi2.anki.ScreenshotTestCategory")
+                        test.systemProperty("screenshot.accessibilityScan", project.hasProperty("accessibilityScan"))
                     }
                     // Ensures that no EmptyApplication test relies on AnkiDroidApp
                     //  by only running EmptyApplication tests
@@ -388,6 +364,27 @@ android {
         resources {
             excludes += listOf("META-INF/DEPENDENCIES")
         }
+    }
+}
+
+androidComponents.onVariants(androidComponents.selector().withBuildType("release")) { variant ->
+    // We want the same version stream for all ABIs in debug but for release we can split them
+    val versionCodes = mapOf("armeabi-v7a" to 1, "x86" to 2, "arm64-v8a" to 3, "x86_64" to 4)
+    variant.outputs.forEach { output ->
+        // Universal APKs keep their base version code; return early
+        val abi = output.filters.find { it.filterType == FilterType.ABI }?.identifier ?: return@forEach
+
+        // For each separate APK per architecture, set a unique version code as described here:
+        // https://developer.android.com/studio/build/configure-apk-splits.html
+        //  From: https://developer.android.com/studio/publish/versioning#appversioning
+        //  "Warning: The greatest value Google Play allows for versionCode is 2100000000"
+        //  AnkiDroid versionCodes have a budget 8 digits (through AnkiDroid 9)
+        //  This style does ABI version code ranges with the 9th digit as 0-4.
+        //  This consumes ~20% of the version range space, w/50 years of versioning at our major-version pace
+        output.versionCode.set(
+            // ex:  321200106 = 3 * 100000000 + 21200106
+            versionCodes.getValue(abi) * 100000000 + output.versionCode.get(),
+        )
     }
 }
 
@@ -718,8 +715,6 @@ afterEvaluate {
     }
 }
 
-apply(from = "./robolectricDownloader.gradle")
-
 android {
     lint {
         // Analyze project-local dependencies (:common:android etc.) as part of this
@@ -729,9 +724,10 @@ android {
     }
 }
 
-configurations.configureEach {
+configurations.matching { it.name.endsWith("CompileClasspath") || it.name.endsWith("RuntimeClasspath") }.configureEach {
     resolutionStrategy {
-        // Timber has this as a dependency but they are not up to date. We want to force our version.
+        // Keep app dependencies such as Timber on our annotations version. Changing Kotlin's
+        // compiler classpath creates an extra compiler daemon and increases peak memory use.
         force(libs.jetbrains.annotations)
     }
 }
@@ -751,7 +747,9 @@ dependencies {
     implementation(project(":common"))
     implementation(project(":common:android"))
     implementation(project(":compat"))
+    implementation(project(":feature:browse"))
     implementation(project(":libanki"))
+    implementation(project(":note-editor"))
     implementation(project(":vbpd"))
     "baselineProfile"(project(":baselineprofile"))
     implementation(project(":widgets"))
@@ -759,21 +757,14 @@ dependencies {
     implementation(libs.google.analytics.kt)
 
     implementation(libs.androidx.activity)
-    // TODO: hoist the Compose enablement (kotlin.compose plugin, buildFeatures.compose,
-    // and the dependencies below) into a convention plugin under `buildSrc/` once the
-    // Kotlin-DSL migration of this build script lands
     implementation(libs.androidx.activity.compose)
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.tooling.preview)
-    implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
-    debugImplementation(libs.androidx.compose.ui.tooling)
     implementation(libs.androidx.annotation)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.browser)
-    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.concurrent.futures.ktx)
+    implementation(libs.androidx.core)
     implementation(libs.androidx.draganddrop)
     implementation(libs.androidx.exifinterface)
     implementation(libs.androidx.fragment.ktx)
@@ -788,9 +779,9 @@ dependencies {
     implementation(libs.androidx.webkit)
     implementation(libs.google.material)
     implementation(libs.android.image.cropper)
-    implementation(libs.nanohttpd)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.seismic)
+    implementation(libs.process.phoenix)
 
     debugImplementation(libs.androidx.fragment.testing.manifest)
 
@@ -804,7 +795,13 @@ dependencies {
         localProperties.load(project.rootProject.file("local.properties").inputStream())
     }
     if (localProperties["local_backend"] == "true") {
-        implementation(files(rootProject.file("../Anki-Android-Backend/rsdroid/build/outputs/aar/rsdroid-release.aar")))
+        // Local artifacts have no Maven metadata, so both the core JAR and Android AAR are needed.
+        implementation(
+            files(
+                rootProject.file("../Anki-Android-Backend/rsdroid/build/libs/rsdroid.jar"),
+                rootProject.file("../Anki-Android-Backend/rsdroid-android/build/outputs/aar/rsdroid-android-release.aar"),
+            ),
+        )
         testImplementation(files(rootProject.file("../Anki-Android-Backend/rsdroid-testing/build/libs/rsdroid-testing.jar")))
     } else {
         implementation(libs.ankiBackend.backend)
@@ -818,10 +815,9 @@ dependencies {
     implementation(libs.acra.http)
 
     implementation(libs.commons.compress)
-    implementation(libs.commons.collections4) // SetUniqueList
     implementation(libs.commons.io) // FileUtils.contentEquals
     implementation(libs.okhttp)
-    implementation(libs.slf4j.timber)
+    implementation(libs.slf4j.api)
     implementation(libs.jakewharton.timber)
     implementation(libs.jsoup)
     implementation(libs.java.semver) // For AnkiDroid JS API Versioning
@@ -851,12 +847,11 @@ dependencies {
     testImplementation(libs.mockito.kotlin)
     testImplementation(libs.hamcrest)
     testImplementation(libs.test.parameter.injector)
-    // robolectricDownloader.gradle *may* need a new SDK jar entry if they release one or if we change targetSdk. Instructions in that gradle file.
+    // ankidroid.plugins.robolectric-downloader may need a new SDK jar entry
+    // when Robolectric or targetSdk changes. See the instructions in that plugin.
     testImplementation(libs.robolectric)
-    testImplementation(libs.androidx.compose.ui.test.junit4)
-    // Needed for createComposeRule(), but not for createAndroidComposeRule<YourActivity>()
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
     testImplementation(libs.androidx.test.core)
+    testImplementation(libs.androidx.arch.core.testing)
     testImplementation(libs.androidx.test.junit)
     testImplementation(libs.kotlin.reflect)
     testImplementation(libs.kotlin.test)
@@ -875,6 +870,7 @@ dependencies {
     }
     testImplementation(libs.androidx.work.testing)
     testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.accessibility.check)
     testImplementation(libs.roborazzi.rule)
     // for testing flows
     testImplementation(libs.cashapp.turbine)
@@ -906,10 +902,4 @@ dependencies {
     // Required so the ExperimentalCoroutinesApi opt-in (applied globally) doesn't cause
     // an "unresolved" warning, which is treated as an error due to allWarningsAsErrors
     testFixturesImplementation(libs.kotlinx.coroutines.core)
-    // The Kotlin Compose Compiler plugin attaches to every Kotlin compilation in the
-    // module including testFixtures, which has no @Composable code and refuses to
-    // run unless the Compose Runtime is on the classpath. compileOnly satisfies the
-    // plugin's version check without shipping the runtime in the testFixtures output.
-    testFixturesCompileOnly(platform(libs.androidx.compose.bom))
-    testFixturesCompileOnly(libs.androidx.compose.runtime)
 }

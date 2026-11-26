@@ -9,7 +9,6 @@
 package com.ichi2.anki
 
 import android.annotation.SuppressLint
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -43,6 +42,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebView.HitTestResult
 import android.webkit.WebViewClient
@@ -66,6 +66,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.children
 import androidx.core.view.isVisible
 import androidx.lifecycle.Lifecycle.State.RESUMED
+import androidx.lifecycle.lifecycleScope
 import anki.collection.OpChanges
 import anki.scheduler.CardAnswer.Rating
 import com.drakeet.drawer.FullDraggableContainer
@@ -93,6 +94,7 @@ import com.ichi2.anki.cardviewer.SingleCardSide
 import com.ichi2.anki.cardviewer.TTS
 import com.ichi2.anki.cardviewer.TypeAnswer
 import com.ichi2.anki.cardviewer.TypeAnswer.Companion.createInstance
+import com.ichi2.anki.cardviewer.TypeAnswerWebView
 import com.ichi2.anki.cardviewer.ViewerCommand
 import com.ichi2.anki.cardviewer.ViewerRefresh
 import com.ichi2.anki.cardviewer.handledGamepadKeyDown
@@ -109,6 +111,7 @@ import com.ichi2.anki.common.utils.HashUtil.hashSetInit
 import com.ichi2.anki.common.utils.android.HandlerUtils.newHandler
 import com.ichi2.anki.common.utils.android.getResFromAttr
 import com.ichi2.anki.common.utils.android.showThemedToast
+import com.ichi2.anki.common.utils.ext.showIntervalsOnButtons
 import com.ichi2.anki.compat.CompatHelper.Companion.resolveActivityCompat
 import com.ichi2.anki.compat.ResolveInfoFlagsCompat
 import com.ichi2.anki.dialogs.TtsPlaybackErrorDialog
@@ -128,8 +131,7 @@ import com.ichi2.anki.model.FieldFilters.NoSuggestFilter
 import com.ichi2.anki.multimedia.getAvTag
 import com.ichi2.anki.observability.ChangeManager
 import com.ichi2.anki.observability.undoableOp
-import com.ichi2.anki.pages.AnkiServer
-import com.ichi2.anki.pages.CongratsPage
+import com.ichi2.anki.pages.PostRequestBridge
 import com.ichi2.anki.pages.PostRequestHandler
 import com.ichi2.anki.pages.PostRequestUri
 import com.ichi2.anki.reviewer.AutomaticAnswer
@@ -148,7 +150,7 @@ import com.ichi2.anki.settings.Prefs
 import com.ichi2.anki.snackbar.BaseSnackbarBuilderProvider
 import com.ichi2.anki.snackbar.SnackbarBuilder
 import com.ichi2.anki.snackbar.showSnackbar
-import com.ichi2.anki.ui.windows.reviewer.StudyScreenRepository
+import com.ichi2.anki.study.StudyCompletionUi
 import com.ichi2.anki.utils.OnlyOnce.Method.ANSWER_CARD
 import com.ichi2.anki.utils.OnlyOnce.preventSimultaneousExecutions
 import com.ichi2.anki.utils.ext.isTouchWithinBounds
@@ -177,6 +179,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 import java.util.function.Consumer
 import java.util.function.Function
 import kotlin.math.abs
+import com.ichi2.anki.common.android.R as CommonR
 
 abstract class AbstractFlashcardViewer :
     NavigationDrawerActivity(),
@@ -275,10 +278,6 @@ abstract class AbstractFlashcardViewer :
      * Gesture Allocation
      */
     protected val gestureProcessor = GestureProcessor(this)
-
-    // needs to be lateinit due to a reliance on Context
-
-    lateinit var server: AnkiServer
 
     @get:VisibleForTesting
     var cardContent: String? = null
@@ -524,7 +523,7 @@ abstract class AbstractFlashcardViewer :
             closeReviewer(RESULT_NO_MORE_CARDS)
             // When launched with a shortcut, we want to display a message when finishing
             if (intent.getBooleanExtra(EXTRA_STARTED_WITH_SHORTCUT, false)) {
-                CongratsPage.display(this)
+                StudyCompletionUi.displayFromShortcut(this)
             }
             return
         }
@@ -557,8 +556,6 @@ abstract class AbstractFlashcardViewer :
 
         setContentView(getContentViewAttr(fullscreenMode))
 
-        val port = StudyScreenRepository().getServerPort()
-        server = AnkiServer(this, port).also { it.start() }
         // Make ACTION_PROCESS_TEXT for in-app searching possible on > Android 4.0
         delegate.isHandleNativeActionModesEnabled = true
 
@@ -656,9 +653,6 @@ abstract class AbstractFlashcardViewer :
 
     override fun onDestroy() {
         super.onDestroy()
-        if (this::server.isInitialized) {
-            server.stop()
-        }
         tts.releaseTts(this)
         // WebView.destroy() should be called after the end of use
         // http://developer.android.com/reference/android/webkit/WebView.html#destroy()
@@ -975,7 +969,7 @@ abstract class AbstractFlashcardViewer :
             }
         }
         if (animationEnabled()) {
-            flipCardLayout?.setBackgroundResource(getResFromAttr(this, R.attr.hardButtonRippleRef))
+            flipCardLayout?.setBackgroundResource(getResFromAttr(this, CommonR.attr.answerButtonRippleRef))
         }
         if (!buttonHeightSet && relativeButtonSize != 100) {
             val params = flipCardLayout!!.layoutParams
@@ -1063,6 +1057,8 @@ abstract class AbstractFlashcardViewer :
                     allowFileAccess = true
                     // enable dom storage so that sessionStorage & localStorage can be used in webview
                     domStorageEnabled = true
+                    // the cards are served over https, but their templates may use http:// resources, like scripts
+                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 }
                 webChromeClient = AnkiDroidWebChromeClient()
                 isFocusableInTouchMode = typeAnswer!!.useInputTag
@@ -1073,6 +1069,7 @@ abstract class AbstractFlashcardViewer :
                     webViewClient = this
                     this@AbstractFlashcardViewer.webViewClient = this
                 }
+                PostRequestBridge(this@AbstractFlashcardViewer, lifecycleScope).attachTo(this)
             }
         Timber.d(
             "Focusable = %s, Focusable in touch mode = %s",
@@ -1270,7 +1267,7 @@ abstract class AbstractFlashcardViewer :
         // These are preferences we pull out of the collection instead of SharedPreferences
         try {
             lifecycle.removeObserver(automaticAnswer)
-            showNextReviewTime = col.config.get("estTimes") ?: true
+            showNextReviewTime = col.config.showIntervalsOnButtons
             automaticAnswer = AutomaticAnswer.createInstance(this, col)
             lifecycle.addObserver(automaticAnswer)
         } catch (ex: Exception) {
@@ -1575,7 +1572,7 @@ abstract class AbstractFlashcardViewer :
         if (card != null) {
             card.settings.mediaPlaybackRequiresUserGesture = cardMediaPlayer.config?.autoplay != true
             card.loadDataWithBaseURL(
-                server.baseUrl(),
+                PostRequestBridge.BASE_URL,
                 content,
                 "text/html",
                 null,
@@ -2015,7 +2012,7 @@ abstract class AbstractFlashcardViewer :
     /** Fixing bug 720: <input></input> focus, thanks to pablomouzo on android issue 7189  */
     internal inner class MyWebView(
         context: Context?,
-    ) : WebView(context!!) {
+    ) : TypeAnswerWebView(context!!) {
         override fun loadDataWithBaseURL(
             baseUrl: String?,
             data: String,
@@ -2625,7 +2622,8 @@ abstract class AbstractFlashcardViewer :
             }
             if (intent == null) {
                 val uri = url.toUri()
-                if (!appPermission.checkCanLaunchExternalApps()) {
+                intent = appPermission.createUrlIntent(uri)
+                if (intent == null) {
                     Timber.w("URL blocked: canLaunchExternalApps")
                     return true
                 }
@@ -2634,14 +2632,13 @@ abstract class AbstractFlashcardViewer :
                     return true
                 }
                 Timber.d("Opening external link \"%s\" with an Intent", url)
-                intent = Intent(Intent.ACTION_VIEW, uri)
             } else {
                 Timber.d("Opening resolved external link \"%s\" with an Intent: %s", url, intent)
             }
             try {
                 startActivity(intent)
-            } catch (_: ActivityNotFoundException) {
-                Timber.w("No app found to handle open external url from AbstractFlashcardViewer")
+            } catch (e: Exception) {
+                Timber.w(e, "Could not open url from AbstractFlashcardViewer")
                 showSnackbar(CommonString.activity_start_failed)
             }
             return true

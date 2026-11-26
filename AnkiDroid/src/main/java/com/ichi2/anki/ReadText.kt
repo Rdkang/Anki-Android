@@ -1,18 +1,6 @@
-/*
- * Copyright (c) 2011 Norbert Nagold <norbert.nagold@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it under
- * the terms of the GNU General Public License as published by the Free Software
- * Foundation; either version 3 of the License, or (at your option) any later
- * version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT ANY
- * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
- * PARTICULAR PURPOSE. See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-FileCopyrightText: Copyright (c) 2011 Norbert Nagold <norbert.nagold@gmail.com>
+
 package com.ichi2.anki
 
 import android.annotation.SuppressLint
@@ -27,6 +15,7 @@ import androidx.appcompat.app.AlertDialog
 import com.ichi2.anki.CollectionManager.TR
 import com.ichi2.anki.cardviewer.SingleCardSide
 import com.ichi2.anki.common.utils.android.showThemedToast
+import com.ichi2.anki.dialogs.TtsPlaybackErrorDialog
 import com.ichi2.anki.i18n.getIso3LanguageOrNull
 import com.ichi2.anki.libanki.Card
 import com.ichi2.anki.libanki.Collection
@@ -45,6 +34,7 @@ import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.lang.ref.WeakReference
 import java.util.Locale
+import kotlin.time.Duration.Companion.milliseconds
 
 object ReadText {
     @get:VisibleForTesting(otherwise = VisibleForTesting.NONE)
@@ -182,7 +172,7 @@ object ReadText {
                 }
         }
         // Give the user a chance to preview the card. The delay is cancelled with the reviewer.
-        delay(500)
+        delay(500.milliseconds)
         try {
             dialog.show()
         } catch (e: BadTokenException) {
@@ -337,7 +327,9 @@ object ReadText {
                             }
                         }
                 } else {
-                    showThemedToast(context, context.getString(CommonString.no_tts_available_message), false)
+                    if (ankiActivityContext == null || !TtsPlaybackErrorDialog.showMissingEngineDialogIfNeeded(ankiActivityContext)) {
+                        showThemedToast(context, context.getString(CommonString.no_tts_available_message), false)
+                    }
                     Timber.w("TTS not successfully initialized")
                 }
             }

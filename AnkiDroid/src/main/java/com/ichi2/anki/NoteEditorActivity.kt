@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.VisibleForTesting
 import androidx.core.content.edit
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat.Type.displayCutout
@@ -26,8 +27,8 @@ import com.ichi2.anki.libanki.Collection
 import com.ichi2.anki.noteeditor.NoteEditorFragmentDelegate
 import com.ichi2.anki.previewer.TemplatePreviewerArguments
 import com.ichi2.anki.previewer.TemplatePreviewerFragment
-import com.ichi2.anki.settings.Prefs
 import com.ichi2.anki.settings.enums.DayTheme
+import com.ichi2.anki.settings.uiConfigPrefs
 import com.ichi2.anki.snackbar.BaseSnackbarBuilderProvider
 import com.ichi2.anki.snackbar.SnackbarBuilder
 import com.ichi2.anki.startup.ensureStorageIsReady
@@ -39,6 +40,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import timber.log.Timber
 import kotlin.time.Duration.Companion.milliseconds
+import com.ichi2.anki.common.android.R as CommonR
 
 /**
  * To find the actual note Editor, @see [NoteEditorFragment]
@@ -96,13 +98,15 @@ class NoteEditorActivity :
     val hasPreviewerPane: Boolean
         get() = previewerFrame != null
 
-    private lateinit var binding: ActivityNoteEditorBinding
+    @VisibleForTesting
+    internal lateinit var binding: ActivityNoteEditorBinding
+        private set
 
     private fun setupEdgeToEdge() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isNavigationBarContrastEnforced = false
         } else {
-            setNavigationBarColor(R.attr.toolbarBackgroundColor)
+            setNavigationBarColor(CommonR.attr.toolbarBackgroundColor)
         }
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
             val bars = insets.getInsets(systemBars() or displayCutout() or ime())
@@ -185,11 +189,11 @@ class NoteEditorActivity :
             ResizablePaneManager(
                 parentLayout = parentLayout,
                 divider = divider,
-                leftPane = noteEditorPane,
-                rightPane = previewerPane,
-                sharedPrefs = Prefs.getUiConfig(this),
-                leftPaneWeightKey = PREF_NOTE_EDITOR_PANE_WEIGHT,
-                rightPaneWeightKey = PREF_PREVIEWER_PANE_WEIGHT,
+                startPane = noteEditorPane,
+                endPane = previewerPane,
+                sharedPrefs = uiConfigPrefs(),
+                startPaneWeightKey = PREF_NOTE_EDITOR_PANE_WEIGHT,
+                endPaneWeightKey = PREF_PREVIEWER_PANE_WEIGHT,
             )
             if (isPreviewerVisible) {
                 // Defer previewer loading to avoid blocking onCreate
@@ -213,10 +217,10 @@ class NoteEditorActivity :
         }
     }
 
-    private fun loadPreviewerVisibilityPreference(): Boolean = Prefs.getUiConfig(this).getBoolean(PREF_SHOW_PREVIEWER, true)
+    private fun loadPreviewerVisibilityPreference(): Boolean = uiConfigPrefs().getBoolean(PREF_SHOW_PREVIEWER, true)
 
     private fun savePreviewerVisibilityPreference(visible: Boolean) {
-        Prefs.getUiConfig(this).edit { putBoolean(PREF_SHOW_PREVIEWER, visible) }
+        uiConfigPrefs().edit { putBoolean(PREF_SHOW_PREVIEWER, visible) }
     }
 
     private fun applyPreviewerVisibility() {

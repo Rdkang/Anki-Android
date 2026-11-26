@@ -131,7 +131,7 @@ object CollectionHelper {
      * Reads of an unset collection path rethrow this instead of [StorageNotConfiguredException],
      * so the storage failure is not mistaken for the expected 'no collection path set' state.
      */
-    // TODO: #19552 - consolidate with AnkiDroidApp.fatalError and StorageDecision (a dedicated
+    // TODO: #19552 - consolidate with AnkiDroidApp.startupErrors and StorageDecision (a dedicated
     //  'storage unavailable' state) once the storage setup flow exists
     var systemStorageFailure: SystemStorageException? = null
 
@@ -140,9 +140,10 @@ object CollectionHelper {
      * [PREF_COLLECTION_PATH] is set (or a [ankiDroidDirectoryOverride] is active), which mirrors
      * when [getCurrentAnkiDroidDirectory] can return a directory rather than throwing.
      *
-     * The user is not asked yet: until the dedicated setup flow exists (#19552), the 'decision'
-     * is made on their behalf during startup by `ensureCollectionPathSet` (app module), so this
-     * is [StorageDecision.Decided] by the time the collection is opened.
+     * Startup (`maybeSetDefaultCollectionPath`, app module) decides on the user's behalf according to the
+     * storage policy. If the policy defers the choice, the decision stays undecided. Completing
+     * the permission screen after granting storage access selects public storage
+     * (Issue 13574).
      *
      * @param preferences the preferences the collection path will be read from: pass the same
      * (profile) context's preferences as the [getCurrentAnkiDroidDirectory] call being gated
@@ -153,7 +154,7 @@ object CollectionHelper {
         storageDecisionTestOverride?.let { return it }
         if (ankiDroidDirectoryOverride != null) return StorageDecision.Decided
         // a recorded systemStorageFailure also leaves the path unset: startup has already
-        // surfaced it via AnkiDroidApp.fatalError, and reads rethrow it rather than
+        // surfaced it via AnkiDroidApp.startupErrors, and reads rethrow it rather than
         // reporting 'not configured'
         return if (preferences.contains(PREF_COLLECTION_PATH)) StorageDecision.Decided else StorageDecision.Undecided
     }
@@ -163,7 +164,7 @@ object CollectionHelper {
      *
      * @throws StorageNotConfiguredException if no collection path has been set
      * ([PREF_COLLECTION_PATH] is unset): a default is chosen during startup by
-     * `ensureCollectionPathSet` (app module)
+     * `maybeSetDefaultCollectionPath` (app module)
      * @throws SystemStorageException if startup failed to choose a default collection path
      * ([systemStorageFailure])
      */
@@ -179,7 +180,7 @@ object CollectionHelper {
      *
      * @throws StorageNotConfiguredException if no collection path has been set
      * ([PREF_COLLECTION_PATH] is unset): a default is chosen during startup by
-     * `ensureCollectionPathSet` (app module)
+     * `maybeSetDefaultCollectionPath` (app module)
      * @throws SystemStorageException if startup failed to choose a default collection path
      * ([systemStorageFailure])
      */

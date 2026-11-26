@@ -7,9 +7,10 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import androidx.core.app.PendingIntentCompat
+import com.ichi2.anki.common.android.AlarmManagement
 import com.ichi2.anki.common.time.TimeManager
 import com.ichi2.anki.services.NotificationService
-import com.ichi2.utils.AlarmManagement
+import com.ichi2.anki.settings.Prefs
 import timber.log.Timber
 import java.util.Calendar
 
@@ -77,7 +78,7 @@ object ReviewReminderAlarmManager {
      * triggering [NotificationService.sendReviewReminderNotification], this method is called again to
      * schedule the next upcoming notification. If for some reason the next day's alarm fails to be set by
      * the current day's notification, we fall back to setting alarms whenever the application process is started: see
-     * [com.ichi2.anki.AnkiDroidApp]'s call to [AlarmManagement.scheduleAllNotifications].
+     * [com.ichi2.anki.AnkiDroidApp]'s call to [com.ichi2.anki.scheduleAllNotifications].
      *
      * If an old version of this review reminder with the same review reminder ID has already had
      * its notifications scheduled, this will merely update the existing notifications. If, however,
@@ -200,6 +201,49 @@ object ReviewReminderAlarmManager {
                     "for ${reviewReminder.id.value}",
             )
         }
+    }
+
+    fun unscheduleAllReviewReminderNotifications(context: Context): Set<ReviewReminderId> {
+        val unscheduled = unscheduleAll(context, NotificationService.NotificationServiceAction.ScheduleRecurringNotifications)
+        Timber.i("${reminderLogPrefix()} Unscheduled all review reminder notifications")
+        return unscheduled
+    }
+
+    fun unscheduleAllSnoozedNotifications(context: Context) {
+        unscheduleAll(context, NotificationService.NotificationServiceAction.SnoozeNotification)
+        Timber.i("${reminderLogPrefix()} Unscheduled all snoozed review reminder notifications")
+    }
+
+    private fun unscheduleAll(
+        context: Context,
+        action: NotificationService.NotificationServiceAction,
+    ): Set<ReviewReminderId> {
+        val unscheduled = mutableSetOf<ReviewReminderId>()
+        AlarmManagement.useAlarmManager(context) { alarmManager ->
+            for (id in 0 until Prefs.reviewReminderNextFreeId) {
+                val intent = NotificationService.getIntent(context, ReviewReminderId(id), ReviewReminderScope.Global, action)
+                val pendingIntent =
+                    PendingIntentCompat.getBroadcast(context, id, intent, PendingIntent.FLAG_NO_CREATE, false) ?: continue
+                alarmManager.cancel(pendingIntent)
+                pendingIntent.cancel()
+                unscheduled += ReviewReminderId(id)
+            }
+        }
+        return unscheduled
+    }
+
+    suspend fun rescheduleReviewReminderNotifications(
+        context: Context,
+        ids: Set<ReviewReminderId>,
+    ) {
+        if (ids.isEmpty()) return
+        val reminders =
+            ReviewRemindersDatabase
+                .getAllReminders()
+                .getRemindersList()
+                .filter { it.id in ids }
+        reminders.forEach { scheduleReviewReminderNotification(context, it, attemptImmediateNotification = false) }
+        Timber.i("${reminderLogPrefix()} Rescheduled ${reminders.size} review reminders")
     }
 
     /**

@@ -2,7 +2,6 @@
 
 package com.ichi2.anki.previewer
 
-import androidx.annotation.CallSuper
 import androidx.annotation.VisibleForTesting
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
@@ -16,10 +15,10 @@ import com.ichi2.anki.libanki.Card
 import com.ichi2.anki.libanki.TtsPlayer
 import com.ichi2.anki.multimedia.getAvTag
 import com.ichi2.anki.multimedia.replaceAvRefsWithPlayButtons
-import com.ichi2.anki.pages.AnkiServer
 import com.ichi2.anki.pages.PostRequestHandler
 import com.ichi2.anki.pages.PostRequestUri
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -30,7 +29,7 @@ abstract class CardViewerViewModel(
 ) : ViewModel(),
     OnErrorListener,
     PostRequestHandler {
-    override val onError = MutableSharedFlow<String>()
+    override val onError = Channel<Exception>(Channel.BUFFERED)
     val onMediaError = MutableSharedFlow<String>()
     val onTtsError = MutableSharedFlow<TtsPlayer.TtsError>()
     val mediaErrorHandler =
@@ -43,7 +42,8 @@ abstract class CardViewerViewModel(
 
     val showingAnswer = savedStateHandle.getMutableStateFlow(KEY_SHOWING_ANSWER, false)
 
-    protected val cardMediaPlayer =
+    @VisibleForTesting(otherwise = VisibleForTesting.PROTECTED)
+    val cardMediaPlayer =
         CardMediaPlayer(
             javascriptEvaluator = { launchCatchingIO { eval.emit(it) } },
             mediaErrorListener = mediaErrorHandler,
@@ -51,13 +51,6 @@ abstract class CardViewerViewModel(
             addCloseable(it)
         }
     abstract var currentCard: Deferred<Card>
-
-    abstract val server: AnkiServer
-
-    @CallSuper
-    override fun onCleared() {
-        server.stop()
-    }
 
     /* *********************************************************************************************
      ************************ Public methods: meant to be used by the View **************************
@@ -69,8 +62,6 @@ abstract class CardViewerViewModel(
      * @param isAfterRecreation whether this is being called after an `Activity` recreation
      */
     abstract fun onPageFinished(isAfterRecreation: Boolean)
-
-    fun baseUrl(): String = server.baseUrl()
 
     fun setSoundPlayerEnabled(isEnabled: Boolean) {
         viewModelScope.launch {
@@ -113,6 +104,7 @@ abstract class CardViewerViewModel(
     protected open suspend fun showQuestion() {
         Timber.v("showQuestion")
         showingAnswer.emit(false)
+        mediaErrorHandler.onCardSideChange()
 
         val card = currentCard.await()
         val questionData = withCol { card.question(this) }

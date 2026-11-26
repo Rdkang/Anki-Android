@@ -23,6 +23,7 @@ import com.ichi2.anki.BuildConfig
 import com.ichi2.anki.CollectionManager
 import com.ichi2.anki.FlashCardsContract
 import com.ichi2.anki.api.Flag
+import com.ichi2.anki.backend.queryCursor
 import com.ichi2.anki.common.crashreporting.CrashReportService
 import com.ichi2.anki.common.time.TimeManager
 import com.ichi2.anki.common.utils.annotation.KotlinCleanup
@@ -180,11 +181,14 @@ class CardContentProvider : ContentProvider() {
             return sanitized.toTypedArray()
         }
 
+        private val AUTHORITY = FlashCardsContract.getAuthority(BuildConfig.APPLICATION_ID)
+        private val PERMISSION = FlashCardsContract.getPermission(BuildConfig.APPLICATION_ID)
+
         init {
             fun addUri(
                 path: String,
                 code: Int,
-            ) = uriMatcher.addURI(FlashCardsContract.AUTHORITY, path, code)
+            ) = uriMatcher.addURI(AUTHORITY, path, code)
             // Here you can see all the URIs at a glance
             addUri("notes", NOTES)
             addUri("notes_v2", NOTES_V2)
@@ -288,7 +292,7 @@ class CardContentProvider : ContentProvider() {
                 // Search for notes using direct SQL query
                 val proj = sanitizeNoteProjection(projection)
                 val sql = SQLiteQueryBuilder.buildQueryString(false, "notes", proj, selection, null, null, order, null)
-                col.db.query(sql, *(selectionArgs ?: arrayOf()))
+                col.db.queryCursor(sql, *(selectionArgs ?: arrayOf()))
             }
             NOTES -> {
                 // Search for notes using the libanki browser syntax
@@ -298,7 +302,7 @@ class CardContentProvider : ContentProvider() {
                 if (noteIds.isNotEmpty()) {
                     val sel = "id in (${noteIds.joinToString(",")})"
                     val sql = SQLiteQueryBuilder.buildQueryString(false, "notes", proj, sel, null, null, order, null)
-                    col.db.query(sql)
+                    col.db.queryCursor(sql)
                 } else {
                     null
                 }
@@ -308,7 +312,7 @@ class CardContentProvider : ContentProvider() {
                 val noteId = uri.pathSegments[1]
                 val proj = sanitizeNoteProjection(projection)
                 val sql = SQLiteQueryBuilder.buildQueryString(false, "notes", proj, "id=?", null, null, order, null)
-                col.db.query(sql, noteId)
+                col.db.queryCursor(sql, noteId)
             }
             NOTES_ID_CARDS -> {
                 val currentNote = getNoteFromUri(uri, col)
@@ -373,7 +377,7 @@ class CardContentProvider : ContentProvider() {
                 val columns = projection ?: FlashCardsContract.ReviewInfo.DEFAULT_COLUMNS
                 val rv = MatrixCursor(columns, 1)
                 val selectedDeckBeforeQuery = col.decks.selected()
-                var deckIdOfTemporarilySelectedDeck: Long = -1
+                var deckIdOfTemporarilySelectedDeck: DeckId = -1
                 var limit = 1 // the number of scheduled cards to return
                 var selectionArgIndex = 0
 
@@ -979,7 +983,7 @@ class CardContentProvider : ContentProvider() {
                     // Add to collection
                     col.addNote(newNote, newNote.notetype.did)
 
-                    Uri.withAppendedPath(FlashCardsContract.Note.CONTENT_URI, newNote.id.toString())
+                    Uri.withAppendedPath(uri, newNote.id.toString())
                 }
                 NOTES_ID -> throw IllegalArgumentException("Not possible to insert note with specific ID")
                 NOTES_ID_CARDS, NOTES_ID_CARDS_ORD -> throw IllegalArgumentException(
@@ -1050,7 +1054,7 @@ class CardContentProvider : ContentProvider() {
 
                         // Get the mid and return a URI
                         val noteTypeId = newNoteType.id.toString()
-                        Uri.withAppendedPath(FlashCardsContract.Model.CONTENT_URI, noteTypeId)
+                        Uri.withAppendedPath(uri, noteTypeId)
                     } catch (e: JSONException) {
                         Timber.e(e, "Could not set a field of new note type %s", noteTypeName)
                         null
@@ -1132,7 +1136,7 @@ class CardContentProvider : ContentProvider() {
                         deck.description = deckDesc
                         col.decks.save(deck)
                     }
-                    Uri.withAppendedPath(FlashCardsContract.Deck.CONTENT_ALL_URI, did.toString())
+                    Uri.withAppendedPath(uri, did.toString())
                 }
                 DECK_SELECTED -> throw IllegalArgumentException("Selected deck can only be queried and updated")
                 DECKS_ID -> throw IllegalArgumentException("Not possible to insert deck with specific ID")
@@ -1162,7 +1166,7 @@ class CardContentProvider : ContentProvider() {
             val media = col.media
             // idea, open input stream and save to cache directory, then
             // pass this (hopefully temporary) file to the media.addFile function.
-            val fileMimeType = MimeTypeMap.getSingleton().getExtensionFromMimeType(cR.getType(fileUri)) // return eg "jpeg"
+            val fileExtension = MimeTypeMap.getSingleton().getExtensionFromMimeType(cR.getType(fileUri)) // return eg "jpeg"
             // should we be enforcing strict mimetypes? which types?
             val tempMediaDir = FileUtil.getAnkiCacheDirectory(context!!, "temp-media")
             if (tempMediaDir == null) {
@@ -1176,7 +1180,7 @@ class CardContentProvider : ContentProvider() {
                         // the beginning of the filename.
                         preferredName + "_",
                         // this is the extension, if null, '.tmp' is used, need to get the extension from MIME type?
-                        ".$fileMimeType",
+                        ".$fileExtension",
                         File(tempMediaDir),
                     )
                 tempFile.deleteOnExit()
@@ -1185,7 +1189,7 @@ class CardContentProvider : ContentProvider() {
                 return null
             }
             internalizeUri(fileUri, tempFile, cR)
-            val fname = media.addFile(tempFile)
+            val fname = media.addFile(tempFile, desiredName = "$preferredName.$fileExtension")
             Timber.d("insert -> MEDIA: fname = %s", fname)
             val f = File(fname)
             Timber.d("insert -> MEDIA: f = %s", f)
@@ -1483,15 +1487,14 @@ class CardContentProvider : ContentProvider() {
 
     private fun hasReadWritePermission(): Boolean =
         if (BuildConfig.DEBUG) { // Allow self-calling of the provider only in debug builds (e.g. for unit tests)
-            context!!.checkCallingOrSelfPermission(FlashCardsContract.READ_WRITE_PERMISSION) == PackageManager.PERMISSION_GRANTED
+            context!!.checkCallingOrSelfPermission(PERMISSION) == PackageManager.PERMISSION_GRANTED
         } else {
-            context!!.checkCallingPermission(FlashCardsContract.READ_WRITE_PERMISSION) == PackageManager.PERMISSION_GRANTED
+            context!!.checkCallingPermission(PERMISSION) == PackageManager.PERMISSION_GRANTED
         }
 
     /** Returns true if the calling package is known to be "rogue" and should be blocked.
      * Calling package might be rogue if it has not declared #READ_WRITE_PERMISSION in its manifest */
-    private fun knownRogueClient(): Boolean =
-        !context!!.arePermissionsDefinedInManifest(callingPackage!!, FlashCardsContract.READ_WRITE_PERMISSION)
+    private fun knownRogueClient(): Boolean = !context!!.arePermissionsDefinedInManifest(callingPackage!!, PERMISSION)
 }
 
 /** replaces [anki:play...] with [sound:] */

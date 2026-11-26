@@ -2,19 +2,14 @@
 
 package com.ichi2.anki.cardviewer
 
-import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ichi2.anki.CollectionManager.withCol
 import com.ichi2.anki.Reviewer.Companion.EXTRA_DECK_ID
 import com.ichi2.anki.libanki.Card
 import com.ichi2.testutils.JvmTest
 import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.equalTo
-import org.junit.Ignore
 import org.junit.Test
-import org.junit.runner.RunWith
 
-// PERF: remove AndroidApplication
-@RunWith(AndroidJUnit4::class)
 class CardSoundConfigTest : JvmTest() {
     @Test
     fun `default values`() =
@@ -51,11 +46,6 @@ class CardSoundConfigTest : JvmTest() {
                 assertThat("same note", this.appliesTo(note2.firstCard()))
             }
         }
-
-    @Ignore("not implemented")
-    @Test
-    fun `cards with the same deck options are equal`() {
-    }
 
     private suspend fun createCardSoundConfig(card: Card) = withCol { CardSoundConfig.create(this@withCol, card) }
 }

@@ -2,25 +2,18 @@
 
 package com.ichi2.anki.sync
 
-import android.content.DialogInterface
-import androidx.appcompat.app.AlertDialog
 import com.ichi2.anki.RobolectricTest
 import com.ichi2.anki.settings.Prefs
-import com.ichi2.testutils.EmptyAnkiActivity
 import io.mockk.every
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
 import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.equalTo
-import org.hamcrest.Matchers.notNullValue
-import org.hamcrest.Matchers.nullValue
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.shadows.ShadowDialog
-import org.robolectric.shadows.ShadowLooper
 
 /** Tests for [MeteredSyncPolicy] */
 @RunWith(RobolectricTestRunner::class)
@@ -43,44 +36,19 @@ class MeteredSyncPolicyTest : RobolectricTest() {
 
         val result = attemptMeteredSync()
 
-        assertThat("onDialogShown not called", result.dialogShown, equalTo(false))
+        assertThat("no confirmation required", result.confirmationRequired, equalTo(false))
         assertThat("onConfirm ran", result.onConfirmCalled, equalTo(true))
-        assertThat("no dialog shown", result.dialog, nullValue())
+        assertThat(result.permission, equalTo(MeteredSyncPermission.USE_PREFERENCES))
     }
 
     @Test
-    fun `shows dialog and notifies onDialogShown when blocked`() {
+    fun `requests confirmation when blocked without starting sync`() {
         every { MeteredSyncPolicy.shouldBlock() } returns true
 
         val result = attemptMeteredSync()
 
-        assertThat("onDialogShown invoked", result.dialogShown, equalTo(true))
+        assertThat("confirmation requested", result.confirmationRequired, equalTo(true))
         assertThat("onConfirm not yet run", result.onConfirmCalled, equalTo(false))
-        assertThat("dialog shown", result.dialog, notNullValue())
-    }
-
-    @Test
-    fun `Continue runs onConfirm`() {
-        every { MeteredSyncPolicy.shouldBlock() } returns true
-
-        val result = attemptMeteredSync()
-        assertThat("onConfirm not called initially", result.onConfirmCalled, equalTo(false))
-
-        result.clickContinue()
-
-        assertThat("onConfirm ran after Continue", result.onConfirmCalled, equalTo(true))
-    }
-
-    @Test
-    fun `Cancel does not run onConfirm`() {
-        every { MeteredSyncPolicy.shouldBlock() } returns true
-
-        val result = attemptMeteredSync()
-        assertThat("onConfirm not called initially", result.onConfirmCalled, equalTo(false))
-
-        result.clickCancel()
-
-        assertThat("onConfirm not run after Cancel", result.onConfirmCalled, equalTo(false))
     }
 
     @Test
@@ -91,8 +59,8 @@ class MeteredSyncPolicyTest : RobolectricTest() {
         val result = attemptMeteredSync(skipPrompt = true)
 
         assertThat("onConfirm ran immediately", result.onConfirmCalled, equalTo(true))
-        assertThat("no dialog shown", result.dialog, nullValue())
-        assertThat("onDialogShown not called", result.dialogShown, equalTo(false))
+        assertThat("no confirmation required", result.confirmationRequired, equalTo(false))
+        assertThat(result.permission, equalTo(MeteredSyncPermission.ALLOW_METERED_SYNC_THIS_TIME))
     }
 
     @Test
@@ -102,7 +70,8 @@ class MeteredSyncPolicyTest : RobolectricTest() {
         val result = attemptMeteredSync(skipPrompt = true)
 
         assertThat("onConfirm ran immediately", result.onConfirmCalled, equalTo(true))
-        assertThat("no dialog shown", result.dialog, nullValue())
+        assertThat("no confirmation required", result.confirmationRequired, equalTo(false))
+        assertThat(result.permission, equalTo(MeteredSyncPermission.ALLOW_METERED_SYNC_THIS_TIME))
     }
 
     @Test
@@ -113,44 +82,24 @@ class MeteredSyncPolicyTest : RobolectricTest() {
         assertThat(Prefs.allowSyncOnMeteredConnections, equalTo(true))
     }
 
-    /** Invokes [MeteredSyncPolicy.confirmThen] from a freshly-built activity. */
+    /** Records the policy decision without creating UI or starting a sync. */
     private fun attemptMeteredSync(skipPrompt: Boolean = false): MeteredSyncAttemptResult {
-        var dialogShown = false
-        var confirmed = false
-        with(startRegularActivity<EmptyAnkiActivity>()) {
-            MeteredSyncPolicy.confirmThen(
-                skipPrompt = skipPrompt,
-                onDialogShown = { dialogShown = true },
-            ) { confirmed = true }
-        }
+        var confirmationRequired = false
+        var permission: MeteredSyncPermission? = null
+        MeteredSyncPolicy.confirmThen(
+            skipPrompt = skipPrompt,
+            onConfirmationRequired = { confirmationRequired = true },
+        ) { permission = it }
         return MeteredSyncAttemptResult(
-            dialogShown = dialogShown,
-            isConfirmed = { confirmed },
-            dialog = ShadowDialog.getLatestDialog() as? AlertDialog,
+            confirmationRequired = confirmationRequired,
+            permission = permission,
         )
     }
 
-    /**
-     * Tracks the side effects of a single call to [MeteredSyncPolicy.confirmThen].
-     *
-     * @property dialogShown whether the warning dialog's `onDialogShown` callback fired
-     * @property onConfirmCalled whether `onConfirm` has been invoked
-     * @property dialog the most recently displayed [AlertDialog], or `null` if none was shown
-     */
     private class MeteredSyncAttemptResult(
-        val dialogShown: Boolean,
-        private val isConfirmed: () -> Boolean,
-        val dialog: AlertDialog?,
+        val confirmationRequired: Boolean,
+        val permission: MeteredSyncPermission?,
     ) {
-        val onConfirmCalled: Boolean get() = isConfirmed()
-
-        fun clickContinue() = clickDialogButton(DialogInterface.BUTTON_POSITIVE)
-
-        fun clickCancel() = clickDialogButton(DialogInterface.BUTTON_NEGATIVE)
-
-        private fun clickDialogButton(button: Int) {
-            dialog!!.getButton(button).performClick()
-            ShadowLooper.runUiThreadTasks()
-        }
+        val onConfirmCalled: Boolean get() = permission != null
     }
 }

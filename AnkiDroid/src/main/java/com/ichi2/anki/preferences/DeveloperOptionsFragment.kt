@@ -7,9 +7,11 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.edit
 import androidx.preference.Preference
 import androidx.preference.SwitchPreferenceCompat
+import com.google.android.material.color.DynamicColors
 import com.ichi2.anki.AnkiDroidApp
 import com.ichi2.anki.BuildConfig
 import com.ichi2.anki.CollectionManager.withCol
+import com.ichi2.anki.CommonPreferenceKey
 import com.ichi2.anki.CommonString
 import com.ichi2.anki.R
 import com.ichi2.anki.analytics.AnkiDroidUsageAnalytics
@@ -47,6 +49,13 @@ class DeveloperOptionsFragment : SettingsFragment() {
         setupEnableDeveloperOptions()
         requirePreference<SwitchPreferenceCompat>(R.string.dev_bottom_nav_key).isVisible =
             resources.getBoolean(R.bool.bottom_navigation_available)
+        requirePreference<SwitchPreferenceCompat>(R.string.dev_material_you_key).apply {
+            isVisible = DynamicColors.isDynamicColorAvailable()
+            setOnPreferenceChangeListener { _, _ ->
+                ActivityCompat.recreate(requireActivity())
+                true
+            }
+        }
         // Make it possible to test crash reporting
         requirePreference<Preference>(R.string.pref_trigger_crash_key).setOnPreferenceClickListener {
             // If we don't delete the limiter data, our test crash may not go through,
@@ -173,7 +182,7 @@ class DeveloperOptionsFragment : SettingsFragment() {
          * with a "Review reminders" button, so we need to immediately reload the settings activity
          * to make this change show up.
          */
-        requirePreference<Preference>(R.string.pref_new_review_reminders).setOnPreferenceChangeListener { _, _ ->
+        requirePreference<Preference>(CommonPreferenceKey.pref_new_review_reminders).setOnPreferenceChangeListener { _, _ ->
             ActivityCompat.recreate(requireActivity())
             true
         }

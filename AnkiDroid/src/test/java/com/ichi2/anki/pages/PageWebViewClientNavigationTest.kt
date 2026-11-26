@@ -48,18 +48,28 @@ class PageWebViewClientNavigationTest : PageWebViewClientTestBase() {
     fun `bundled pages and nested routes stay internal with queries and fragments`() =
         withStatistics { view, client ->
             val pageUrl = assertNotNull(view.url).toUri()
-            val urls =
+            val paths =
                 listOf(
-                    pageUrl,
+                    "/graphs",
+                    "/congrats",
+                    "/card-info",
+                    "/change-notetype",
+                    "/deck-options",
+                    "/import-anki-package",
+                    "/import-csv",
+                    "/import-page",
+                    "/image-occlusion",
+                    "/deck-options/1",
+                    "/card-info/1/2",
+                )
+            for (path in paths) {
+                val url =
                     pageUrl
                         .buildUpon()
-                        .path("/deck-options/1")
+                        .path(path)
                         .query("test=1")
                         .fragment("night")
-                        .build(),
-                    pageUrl.buildUpon().path("/card-info/1/2").build(),
-                )
-            for (url in urls) {
+                        .build()
                 assertFalse(client.shouldOverrideUrlLoading(view, request(url.toString())), url.toString())
                 targetContext.assertNoActivityStarted(url.toString())
             }
@@ -71,9 +81,9 @@ class PageWebViewClientNavigationTest : PageWebViewClientTestBase() {
             val url = assertNotNull(view.url).toUri()
             val otherOrigins =
                 listOf(
-                    url.buildUpon().scheme("https").build(),
-                    url.buildUpon().encodedAuthority("127.0.0.1:${url.port + 1}").build(),
-                    url.buildUpon().encodedAuthority("example.org:${url.port}").build(),
+                    url.buildUpon().scheme("http").build(),
+                    url.buildUpon().encodedAuthority("${url.host}:8443").build(),
+                    url.buildUpon().encodedAuthority("example.org").build(),
                     url.buildUpon().encodedAuthority("user@${url.encodedAuthority}").build(),
                 )
             for (other in otherOrigins) {
@@ -86,7 +96,7 @@ class PageWebViewClientNavigationTest : PageWebViewClientTestBase() {
     fun `unbundled local paths are blocked`() =
         withStatistics { view, client ->
             val pageUrl = assertNotNull(view.url).toUri()
-            for (path in listOf("/", "/unknown", "/graphs-other", "/_anki/test", "/_app/env.js")) {
+            for (path in listOf("/", "/unknown", "/graphs-other", "/editor", "/editor/1", "/preferences", "/_anki/test", "/_app/env.js")) {
                 val address =
                     pageUrl
                         .buildUpon()

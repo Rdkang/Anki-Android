@@ -5,7 +5,6 @@ package com.ichi2.anki
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
-import androidx.activity.OnBackPressedCallback
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat.Type.navigationBars
 import androidx.core.view.isVisible
@@ -16,13 +15,17 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentTransaction
 import androidx.fragment.app.commit
 import androidx.lifecycle.ViewModelProvider
+import com.google.android.material.behavior.HideViewOnScrollBehavior
 import com.google.android.material.bottomnavigation.BottomNavigationView
+import com.google.android.material.color.MaterialColors
 import com.ichi2.anki.BottomNavController.NavigationItem
 import com.ichi2.anki.browser.CardBrowserFragment
 import com.ichi2.anki.browser.CardBrowserViewModel
+import com.ichi2.anki.browser.IdsFile
 import com.ichi2.anki.common.analytics.Analytics
 import com.ichi2.anki.common.annotations.NeedsTest
 import com.ichi2.anki.pages.Statistics
+import com.google.android.material.R as MaterialR
 
 /**
  * Manages the bottom navigation bar for the home screen.
@@ -39,21 +42,75 @@ fun setupBottomNavigation() {
     }
     if (!deckPicker.bottomNavigationEnabled) return
 
-    val bottomNav = deckPicker.findViewById<BottomNavigationView>(R.id.bottom_navigation)
-    val fragmentContainer = deckPicker.findViewById<View>(R.id.bottom_nav_fragment_container)
-    val contentWrapper = deckPicker.findViewById<View>(R.id.deck_picker_content_wrapper)
+    val binding = deckPicker.binding
+    val bottomNav = checkNotNull(binding.bottomNavigation)
+    val fragmentContainer = checkNotNull(binding.bottomNavFragmentContainer)
+    val studiedSummary = deckPicker.deckPickerBinding.reviewSummaryTextView
+    // Once raised above the bar, the summary overlaps the deck list: a solid background stops deck names showing through.
+    studiedSummary.setBackgroundColor(MaterialColors.getColor(bottomNav, MaterialR.attr.colorSurface))
     bottomNav.isVisible = true
+    val scrollBehavior = HideViewOnScrollBehavior.from(bottomNav)
+
+    fun updateFragmentBottomMargin() {
+        val margin =
+            if (scrollBehavior.isScrolledIn) {
+                bottomNav.height
+            } else {
+                ViewCompat.getRootWindowInsets(bottomNav)?.getInsets(navigationBars())?.bottom ?: 0
+            }
+        if (fragmentContainer.marginBottom != margin) {
+            fragmentContainer.updateLayoutParams<ViewGroup.MarginLayoutParams> { bottomMargin = margin }
+        }
+    }
+
+    fun positionStudiedSummary(animate: Boolean) {
+        // The "Studied X cards today" summary is anchored to the bottom of the Decks layout, not to the bar.
+        // Raise it above the bar while the bar is shown. When the bar hides, return it to its resting
+        // position, where its bottom padding already keeps it above the system navigation bar.
+        val translation =
+            if (scrollBehavior.isScrolledIn && studiedSummary.height > 0) {
+                val navLocation = IntArray(2).also(bottomNav::getLocationInWindow)
+                val summaryLocation = IntArray(2).also(studiedSummary::getLocationInWindow)
+                // Subtract current translations so this is the resting position, even mid-animation.
+                val navTop = navLocation[1] - bottomNav.translationY
+                val summaryContentBottom =
+                    summaryLocation[1] - studiedSummary.translationY + studiedSummary.height - studiedSummary.paddingBottom
+                // Only ever raise it: an open keyboard already pads the text above the bar.
+                (navTop - summaryContentBottom - studiedSummary.marginBottom).coerceAtMost(0f)
+            } else if (scrollBehavior.isScrolledIn) {
+                -bottomNav.height.toFloat()
+            } else {
+                0f
+            }
+        // The deck list fades from the summary downwards. Moving the summary does not redraw that fade,
+        // so redraw it on every step, or it stays at the summary's old position.
+        val fadeWrapper = deckPicker.deckPickerBinding.decksFadeWrapper
+        studiedSummary.animate().cancel()
+        if (animate) {
+            studiedSummary
+                .animate()
+                .translationY(translation)
+                .setDuration(bottomNav.resources.getInteger(android.R.integer.config_shortAnimTime).toLong())
+                .setUpdateListener { fadeWrapper.invalidate() }
+                .start()
+        } else {
+            studiedSummary.translationY = translation
+            fadeWrapper.invalidate()
+        }
+    }
+
+    // Never hide the bar while explore-by-touch (e.g. TalkBack) is on, so it stays reachable.
+    scrollBehavior.disableOnTouchExploration(true)
+    scrollBehavior.addOnScrollStateChangedListener { _, _ ->
+        updateFragmentBottomMargin()
+        positionStudiedSummary(animate = true)
+        // Re-apply insets so the Decks FAB and list padding follow the bar's new position.
+        ViewCompat.requestApplyInsets(deckPicker.deckPickerBinding.root)
+    }
 
     NavigationItem.populateMenu(bottomNav, deckPicker)
 
-    // Return to Home tab on back press when on a non-Home tab
-    val bottomNavBackCallback =
-        object : OnBackPressedCallback(enabled = false) {
-            override fun handleOnBackPressed() {
-                bottomNav.selectedItemId = NavigationItem.HOME.id
-            }
-        }
-    deckPicker.onBackPressedDispatcher.addCallback(deckPicker, bottomNavBackCallback)
+    deckPicker.onBackPressedDispatcher.addCallback(deckPicker, deckPicker.bottomNavBackCallback)
 
     // Handle system navigation bar insets for the bottom nav
     ViewCompat.setOnApplyWindowInsetsListener(bottomNav) { view, insets ->
@@ -66,22 +123,39 @@ fun setupBottomNavigation() {
         val navItem = NavigationItem.fromId(item.itemId) ?: return@setOnItemSelectedListener false
         if (item.itemId != bottomNav.selectedItemId) {
             Analytics.sendAnalyticsScreenView(navItem.analyticsScreenName)
+            scrollBehavior.slideIn(bottomNav)
         }
-        handleNavigationItemSelected(navItem, contentWrapper, fragmentContainer, bottomNavBackCallback)
+        showTab(navItem)
+        true
     }
 
-    bottomNav.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
-        if (fragmentContainer.marginBottom != view.height) {
-            fragmentContainer.updateLayoutParams<ViewGroup.MarginLayoutParams> { bottomMargin = view.height }
+    // A second tap on Browse opens search in the current browser.
+    bottomNav.setOnItemReselectedListener { item ->
+        if (item.itemId == NavigationItem.BROWSER.id) {
+            val browser = deckPicker.supportFragmentManager.findFragmentByTag(NavigationItem.BROWSER.tag) as? CardBrowserFragment
+            browser?.openSearch()
         }
+    }
+
+    bottomNav.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+        updateFragmentBottomMargin()
+        if (bottom - top != oldBottom - oldTop) positionStudiedSummary(animate = false)
+    }
+    studiedSummary.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        if (scrollBehavior.isScrolledIn) positionStudiedSummary(animate = false)
+    }
+}
+
+internal fun BottomNavigationView.selectTab(item: NavigationItem) {
+    if (selectedItemId != item.id) {
+        selectedItemId = item.id
     }
 }
 
 context(deckPicker: DeckPicker)
 fun showRestoredBottomNavTab() {
-    if (!deckPicker.bottomNavigationEnabled) return
-    val bottomNav = deckPicker.binding.bottomNavigation ?: return
-    bottomNav.selectedItemId = bottomNav.selectedItemId
+    val item = selectedBottomNavItem() ?: return
+    showTab(item)
 }
 
 context(deckPicker: DeckPicker)
@@ -92,29 +166,23 @@ fun selectedBottomNavItem(): NavigationItem? {
 }
 
 context(deckPicker: DeckPicker)
-private fun handleNavigationItemSelected(
-    item: NavigationItem,
-    contentWrapper: View,
-    fragmentContainer: View,
-    backCallback: OnBackPressedCallback,
-): Boolean =
+private fun showTab(item: NavigationItem) {
+    val binding = deckPicker.binding
+    val contentWrapper = checkNotNull(binding.deckPickerContentWrapper)
+    val fragmentContainer = checkNotNull(binding.bottomNavFragmentContainer)
+    deckPicker.bottomNavBackCallback.isEnabled = item != NavigationItem.HOME
     when (item) {
         NavigationItem.HOME -> {
             fragmentContainer.isVisible = false
             deckPicker.supportFragmentManager.commit { hideBottomNavFragments() }
             contentWrapper.isVisible = true
             deckPicker.floatingActionMenu.showFloatingActionButton()
-            backCallback.isEnabled = false
-            true
         }
         NavigationItem.BROWSER -> {
-            backCallback.isEnabled = true
             ensureBrowserViewModel()
             showBottomNavFragment(::CardBrowserFragment, item.tag, contentWrapper, fragmentContainer)
-            true
         }
         NavigationItem.STATS -> {
-            backCallback.isEnabled = true
             showBottomNavFragment(
                 {
                     Statistics().apply {
@@ -125,14 +193,12 @@ private fun handleNavigationItemSelected(
                 contentWrapper,
                 fragmentContainer,
             )
-            true
         }
         NavigationItem.MORE -> {
-            backCallback.isEnabled = true
             showBottomNavFragment(::MoreFragment, item.tag, contentWrapper, fragmentContainer)
-            true
         }
     }
+}
 
 /** Create CardBrowserViewModel before the fragment accesses it via activityViewModels() */
 context(deckPicker: DeckPicker)
@@ -141,9 +207,10 @@ private fun ensureBrowserViewModel() {
         deckPicker.viewModelStore,
         CardBrowserViewModel.factory(
             lastDeckIdRepository = AnkiDroidApp.instance.sharedPrefsLastDeckIdRepository,
-            cacheDir = deckPicker.cacheDir,
+            idsFileDirectory = IdsFile.getDirectory(),
             options = null,
             isFragmented = false,
+            initialDeckId = null,
         ),
         deckPicker.defaultViewModelCreationExtras,
     )[CardBrowserViewModel::class.java]
@@ -168,6 +235,18 @@ private fun showBottomNavFragment(
         }
     }
     fragmentContainer.isVisible = true
+}
+
+/**
+ * Hides the bottom bar on downward scrolls and shows it on upward scrolls.
+ * For views which do not send nested-scroll events to the bar's [HideViewOnScrollBehavior].
+ */
+fun Fragment.updateBottomNavOnScroll(dy: Int) {
+    val deckPicker = activity as? DeckPicker ?: return
+    if (dy == 0 || !isVisible || !deckPicker.bottomNavigationEnabled) return
+    val bottomNav = deckPicker.binding.bottomNavigation ?: return
+    val behavior = HideViewOnScrollBehavior.from(bottomNav)
+    if (dy > 0) behavior.slideOut(bottomNav) else behavior.slideIn(bottomNav)
 }
 
 /** Hides any fragments currently hosted in the bottom-nav container. */

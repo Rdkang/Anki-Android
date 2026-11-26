@@ -8,6 +8,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeech.ERROR
 import androidx.annotation.CheckResult
 import com.ichi2.anki.compat.UtteranceProgressListenerCompat
+import com.ichi2.anki.i18n.replaceObsoleteLanguageCode
 import com.ichi2.anki.libanki.TTSTag
 import com.ichi2.anki.libanki.TtsPlayer
 import com.ichi2.anki.libanki.TtsPlayer.TtsCompletionStatus
@@ -24,6 +25,7 @@ import timber.log.Timber
 import kotlin.coroutines.resume
 
 class AndroidTtsPlayer(
+    /** Voices in engine-preference order, with the default engine first. */
     private val voices: List<TtsVoice>,
     /** Builds a [TextToSpeech] bound to an engine package. Overridable for testing */
     private val ttsFactory: suspend (engine: String) -> TextToSpeech? = { engine -> TtsVoices.createTts(engine) },
@@ -93,7 +95,7 @@ class AndroidTtsPlayer(
         TtsVoices.ttsEngine?.let { defaultEngine -> getOrCreateTts(defaultEngine) }
     }
 
-    // Prefer installed voices for language fallback without changing the shared matcher.
+    // Prefer installed voices for language fallback, preserving engine-preference order.
     // Keep uninstalled voices selectable: an explicit request can trigger their download.
     override fun getAvailableVoices(): List<TtsVoice> = voices.sortedBy { it.unavailable() }
 
@@ -120,7 +122,7 @@ class AndroidTtsPlayer(
         }
 
     override suspend fun play(tag: TTSTag): TtsCompletionStatus {
-        val match = voiceForTag(tag)
+        val match = voiceForTag(tag.copy(lang = tag.lang.replaceObsoleteLanguageCode()))
         if (match == null) {
             Timber.w("could not find voice for %s", tag)
             return TtsCompletionStatus.failure(AndroidTtsError.MissingVoiceError(tag))
@@ -198,7 +200,7 @@ class AndroidTtsPlayer(
 
         @CheckResult
         suspend fun createInstance(scope: CoroutineScope): AndroidTtsPlayer {
-            val voices = TtsVoices.allTtsVoices().toList()
+            val voices = TtsVoices.allTtsVoices()
             return AndroidTtsPlayer(voices).apply {
                 init(scope)
                 Timber.v("TTS creation: initialized player instance")
@@ -268,7 +270,7 @@ sealed class AndroidTtsError : TtsPlayer.TtsError() {
                 is AndroidGenericError -> "ERROR"
                 is AndroidSynthesisError -> "ERROR_SYNTHESIS"
                 is AndroidInvalidRequest -> "ERROR_INVALID_REQUEST"
-                is AndroidNetworkError -> "ERROR_NETWORK_ERROR"
+                is AndroidNetworkError -> "ERROR_NETWORK"
                 is AndroidNetworkTimeoutError -> "ERROR_NETWORK_TIMEOUT"
                 is AndroidNotInstalledYet -> "ERROR_NOT_INSTALLED_YET"
                 is AndroidOutputError -> "ERROR_OUTPUT"
@@ -288,6 +290,7 @@ sealed class AndroidTtsError : TtsPlayer.TtsError() {
                 TextToSpeech.ERROR_SYNTHESIS -> AndroidSynthesisError
                 TextToSpeech.ERROR_INVALID_REQUEST -> AndroidInvalidRequest
                 TextToSpeech.ERROR_NETWORK -> AndroidNetworkError
+                TextToSpeech.ERROR_NETWORK_TIMEOUT -> AndroidNetworkTimeoutError
                 TextToSpeech.ERROR_OUTPUT -> AndroidOutputError
                 TextToSpeech.ERROR_NOT_INSTALLED_YET -> AndroidNotInstalledYet
                 TextToSpeech.ERROR_SERVICE -> AndroidServiceError

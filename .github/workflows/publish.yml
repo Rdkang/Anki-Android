@@ -24,9 +24,15 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
+env:
+  JAVA_TOOL_OPTIONS: -Dkotlin.daemon.options=autoshutdownIdleSeconds=10
+
 jobs:
   check_release:
     name: 'Check whether a release is due'
+    permissions:
+      contents: read
+      actions: write # Cancel this run when a scheduled publish is skipped.
     if: github.event_name == 'schedule' && github.repository == 'ankidroid/Anki-Android' && github.ref == 'refs/heads/main'
     timeout-minutes: 20
     runs-on: ubuntu-latest
@@ -90,6 +96,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Raise Gradle Heap
+        run: |
+          mkdir -p ~/.gradle
+          echo "org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" >> ~/.gradle/gradle.properties
+        shell: bash
+
       - name: Install Release Utilities
         run: |
           sudo chown -R $USER /var/lib/gems/
@@ -116,20 +128,19 @@ jobs:
           echo "KEYPWD=${{ secrets.KEYSTORE_KEY_PASSWORD }}" >> $GITHUB_ENV
           mkdir ~/src
           cd ~/src
-          echo "${{ secrets.AMAZON_PUBLISH_CREDENTIALS }}" | base64 -d > ./AnkiDroid-Amazon-Publish-Security-Profile.json.gz
           echo "${{ secrets.GOOGLE_PUBLISH_CREDENTIALS }}" | base64 -d > ./AnkiDroid-GCP-Publish-Credentials.json.gz
           echo "${{ secrets.RELEASES_PUBLISH_TOKEN }}" | base64 -d > ./my-github-personal-access-token.gz
           echo "${{ secrets.KEYSTORE }}" | base64 -d > ./android-keystore.gz
           gunzip *.gz
         shell: bash
 
+      - name: Clone ankidroiddocs for the changelog
+        run: git clone git@github.com:ankidroid/ankidroiddocs ../ankidroiddocs
+        shell: bash
+
       - name: Build and Release public release
         if: "${{ github.event.inputs.public != '' }}"
-        run: |
-          pushd ../
-          git clone git@github.com:ankidroid/ankidroiddocs
-          popd
-          ./tools/release.sh public
+        run: ./tools/release.sh public
         shell: bash
 
       - name: Build and Release test release

@@ -33,16 +33,20 @@ import androidx.annotation.VisibleForTesting
 import androidx.appcompat.view.menu.MenuBuilder
 import androidx.appcompat.widget.ThemeUtils
 import androidx.appcompat.widget.Toolbar
+import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import androidx.core.view.MenuHost
 import androidx.core.view.MenuHostHelper
+import androidx.core.view.MenuItemCompat
 import androidx.core.view.MenuProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat.Type.displayCutout
 import androidx.core.view.WindowInsetsCompat.Type.ime
+import androidx.core.view.WindowInsetsCompat.Type.statusBars
 import androidx.core.view.WindowInsetsCompat.Type.systemBars
 import androidx.core.view.isVisible
+import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePadding
 import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
@@ -55,6 +59,7 @@ import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import anki.collection.OpChanges
+import com.google.android.material.appbar.AppBarLayout
 import com.google.android.material.chip.Chip
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.progressindicator.LinearProgressIndicator
@@ -78,8 +83,8 @@ import com.ichi2.anki.browser.CardBrowserViewModel.ChangeMultiSelectMode
 import com.ichi2.anki.browser.CardBrowserViewModel.ChangeMultiSelectMode.MultiSelectCause
 import com.ichi2.anki.browser.CardBrowserViewModel.ChangeMultiSelectMode.SingleSelectCause
 import com.ichi2.anki.browser.CardBrowserViewModel.ChangeNoteTypeResponse
+import com.ichi2.anki.browser.CardBrowserViewModel.NoteEditorCommand
 import com.ichi2.anki.browser.CardBrowserViewModel.RowSelection
-import com.ichi2.anki.browser.CardBrowserViewModel.SearchResultMessage
 import com.ichi2.anki.browser.CardBrowserViewModel.SearchState
 import com.ichi2.anki.browser.CardBrowserViewModel.SearchState.Initializing
 import com.ichi2.anki.browser.CardBrowserViewModel.SearchState.Searching
@@ -99,17 +104,17 @@ import com.ichi2.anki.browser.search.SearchString
 import com.ichi2.anki.browser.search.SortOrderBottomSheetFragment
 import com.ichi2.anki.browser.search.StandardSearchFragment
 import com.ichi2.anki.browser.search.formatChipDescription
+import com.ichi2.anki.browser.search.getIcon
 import com.ichi2.anki.browser.search.iconRes
-import com.ichi2.anki.browser.search.savedFilters
-import com.ichi2.anki.common.ALL_DECKS_ID
 import com.ichi2.anki.common.annotations.NeedsTest
 import com.ichi2.anki.common.destinations.NoteEditorDestination
 import com.ichi2.anki.common.destinations.navigate
 import com.ichi2.anki.common.utils.ext.ifNotZero
+import com.ichi2.anki.common.utils.ext.savedFilters
 import com.ichi2.anki.dialogs.BrowserOptionsDialog
 import com.ichi2.anki.dialogs.ChangeNoteTypeDialog
 import com.ichi2.anki.dialogs.DeckSelectionDialog
-import com.ichi2.anki.dialogs.DeckSelectionDialog.Companion.ARG_SELECTED_DECK
+import com.ichi2.anki.dialogs.DeckSelectionDialog.Companion.RESULT_SELECTED_DECK
 import com.ichi2.anki.dialogs.GradeNowDialog
 import com.ichi2.anki.dialogs.SaveBrowserSearchDialogFragment
 import com.ichi2.anki.dialogs.SavedBrowserSearchesDialogFragment
@@ -124,6 +129,7 @@ import com.ichi2.anki.filtered.FilteredDeckOptionsFragment
 import com.ichi2.anki.formatCardCount
 import com.ichi2.anki.launchCatchingTask
 import com.ichi2.anki.libanki.DeckId
+import com.ichi2.anki.libanki.exception.InvalidSearchException
 import com.ichi2.anki.libanki.undoAvailable
 import com.ichi2.anki.libanki.undoLabel
 import com.ichi2.anki.model.CardStateFilter
@@ -139,25 +145,31 @@ import com.ichi2.anki.scheduling.SetDueDateDialog
 import com.ichi2.anki.settings.Prefs
 import com.ichi2.anki.snackbar.showSnackbar
 import com.ichi2.anki.ui.RecyclerFastScroller
+import com.ichi2.anki.ui.StableScrollbarLayoutManager
 import com.ichi2.anki.ui.attachFastScroller
 import com.ichi2.anki.ui.internationalization.sentenceCase
 import com.ichi2.anki.undoAndShowSnackbar
+import com.ichi2.anki.updateBottomNavOnScroll
 import com.ichi2.anki.utils.bottomCornerClearance
 import com.ichi2.anki.utils.ext.addPrepareMenuProvider
+import com.ichi2.anki.utils.ext.collectInLifecycle
+import com.ichi2.anki.utils.ext.doOnScrolled
 import com.ichi2.anki.utils.ext.getParcelableCompat
 import com.ichi2.anki.utils.ext.hasCheckedBackground
-import com.ichi2.anki.utils.ext.launchCollectionInLifecycleScope
 import com.ichi2.anki.utils.ext.setFragmentResultListener
 import com.ichi2.anki.utils.ext.showDialogFragment
+import com.ichi2.anki.utils.ext.updateNestedScrolling
 import com.ichi2.anki.utils.ext.visibleItemPositions
 import com.ichi2.anki.utils.hideKeyboard
+import com.ichi2.anki.utils.showSearchError
 import com.ichi2.anki.withProgress
 import com.ichi2.ui.CardBrowserSearchView
+import com.ichi2.ui.RtlCompliantActionProvider
 import com.ichi2.utils.increaseHorizontalPaddingOfOverflowMenuIcons
 import com.ichi2.utils.moveCursorToEnd
 import com.ichi2.utils.replaceText
-import com.ichi2.utils.setPaddedIcon
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import net.ankiweb.rsdroid.RustCleanup
@@ -210,7 +222,7 @@ class CardBrowserFragment :
             if (result.resultCode == Activity.RESULT_OK) {
                 // The old forceRefreshSearch called setQuery(searchView.text) before searching,
                 // but the ViewModel already holds the submitted query, so we just re-run the search directly.
-                activityViewModel.launchSearchForCards()
+                activityViewModel.launchSearchForCards(feedbackMode = BrowserSearchFeedbackMode.COUNT_ONLY)
             }
         }
 
@@ -227,6 +239,9 @@ class CardBrowserFragment :
     // Dev option for Issue 18709
     private val useSearchView: Boolean
         get() = Prefs.devUsingCardBrowserSearchView
+
+    /** Whether this is the bottom navigation's Browse tab, rather than the standalone [CardBrowser] */
+    private fun isHostedInBottomNavigation() = activity !is CardBrowser
 
     /** The standalone CardBrowser activity supplies its own toolbar; embedded hosts do not. */
     private val usesEmbeddedLegacyToolbar: Boolean
@@ -255,6 +270,15 @@ class CardBrowserFragment :
     private var cardStateChip: Chip? = null
     private var flagsChip: Chip? = null
     private var sortChip: Chip? = null
+
+    internal fun openSearch() {
+        if (!isVisible) return
+        if (useSearchView) {
+            searchView?.show()
+        } else {
+            searchItem?.expandActionView()
+        }
+    }
 
     // region legacy menu handling
     var mySearchesItem: MenuItem? = null
@@ -326,7 +350,7 @@ class CardBrowserFragment :
 
         // onSearchForDecks starts deck selection using childFragmentManager
         childFragmentManager.setFragmentResultListener(DeckSelectionDialog.REQUEST_SELECT_DECK, this) { _, bundle ->
-            val selectedDeck = bundle.getParcelableCompat<SelectableDeck>(ARG_SELECTED_DECK)
+            val selectedDeck = bundle.getParcelableCompat<SelectableDeck>(RESULT_SELECTED_DECK)
             activityViewModel.setSelectedDeck(requireNotNull(selectedDeck) { "Expected non-null deck" })
         }
 
@@ -339,6 +363,19 @@ class CardBrowserFragment :
             view.findViewById<RecyclerView>(R.id.card_browser_list).apply {
                 attachFastScroller(R.id.browser_scroller)
                 clipToPadding = false
+                // Upward scrolls in the embedded browser do not reliably reach the bottom bar's
+                // scroll behavior, so drive the bar directly from the list.
+                addOnScrollListener(
+                    object : RecyclerView.OnScrollListener() {
+                        override fun onScrolled(
+                            recyclerView: RecyclerView,
+                            dx: Int,
+                            dy: Int,
+                        ) {
+                            updateBottomNavOnScroll(dy)
+                        }
+                    },
+                )
             }
         applyContentInsets(view)
         DividerItemDecoration(requireContext(), DividerItemDecoration.VERTICAL).apply {
@@ -361,8 +398,9 @@ class CardBrowserFragment :
             )
         cardsListView.adapter = cardsAdapter
         cardsAdapter.stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
-        val layoutManager = LinearLayoutManager(requireContext())
+        val layoutManager = StableScrollbarLayoutManager(requireContext())
         cardsListView.layoutManager = layoutManager
+        setupAppBarScrolling(view)
         cardsListView.addItemDecoration(DividerItemDecoration(requireContext(), layoutManager.orientation))
 
         browserColumnHeadings = view.findViewById(R.id.browser_column_headings)
@@ -401,8 +439,7 @@ class CardBrowserFragment :
         cardStateChip =
             view.findViewById<Chip>(R.id.card_state_chip)?.apply {
                 setOnClickListener {
-                    val fragment = CardStateBottomSheetFragment()
-                    fragment.show(childFragmentManager, CardStateBottomSheetFragment.TAG)
+                    CardStateBottomSheetFragment.show(childFragmentManager)
                 }
             }
         flagsChip =
@@ -484,13 +521,105 @@ class CardBrowserFragment :
         setupMenu()
     }
 
+    /**
+     * Keeps the search controls and headings visible when all results fit beneath the expanded app bar.
+     * Otherwise, the result list can scroll and collapse or reveal the app bar normally. If a change
+     * to the results or viewport makes the list fit, the app bar is expanded again.
+     *
+     * @param root Browser view containing the app bar; layouts without one need no scrolling setup.
+     */
+    private fun setupAppBarScrolling(root: View) {
+        val appBar = root.findViewById<AppBarLayout?>(R.id.browser_app_bar) ?: return
+        val list = cardsListView
+        // Prevent direct app-bar drags when the results fit with the controls visible.
+        appBar.updateLayoutParams<CoordinatorLayout.LayoutParams> {
+            behavior = appBarBehavior { list.isNestedScrollingEnabled }
+        }
+
+        // If every result fits beneath the expanded toolbar, keep the controls visible so the
+        // app bar doesn't scroll unnecessarily
+        // called on scroll/layout change
+        fun updateScrollability() {
+            if (!list.isLaidOut) return
+            val lastRow = layoutManager.findViewByPosition(cardsAdapter.itemCount - 1)
+            // The list is measured for the collapsed app bar. Subtract the space occupied by
+            // the expanded controls, even when they currently extend the list below the screen.
+            val expandedHeight = list.height - appBar.totalScrollRange
+            val fitsExpanded =
+                when {
+                    cardsAdapter.itemCount == 0 -> true
+                    // A missing last row or an offset first row means the full list is not visible.
+                    lastRow == null || list.canScrollVertically(-1) -> false
+                    else -> layoutManager.getDecoratedBottom(lastRow) + list.paddingBottom <= expandedHeight
+                }
+            list.updateNestedScrolling(!fitsExpanded)
+            if (fitsExpanded && appBar.top < 0) appBar.expand(animate = false)
+        }
+
+        // Recheck after viewport changes and as rows enter or leave the visible area.
+        list.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateScrollability() }
+        list.doOnScrolled { _, _ -> updateScrollability() }
+    }
+
+    /** Kotlin wrapper allowing a named [animate] argument. */
+    private fun AppBarLayout.expand(animate: Boolean) = setExpanded(true, animate)
+
+    /** Creates app-bar behavior whose direct dragging is controlled by [dragPredicate]. */
+    private fun appBarBehavior(dragPredicate: (AppBarLayout) -> Boolean) =
+        AppBarLayout.Behavior().apply {
+            setDragCallback(
+                object : AppBarLayout.Behavior.DragCallback() {
+                    override fun canDrag(appBarLayout: AppBarLayout) = dragPredicate(appBarLayout)
+                },
+            )
+        }
+
     private fun applyContentInsets(root: View) {
         val browserScroller = root.findViewById<RecyclerFastScroller>(R.id.browser_scroller)
         val toolbarContainer = root.findViewById<View?>(R.id.toolbar_container)
+        val appBar = root.findViewById<AppBarLayout?>(R.id.browser_app_bar)
+        val topInset = root.findViewById<View?>(R.id.browser_top_inset)
+        val browserContent = root.findViewById<View?>(R.id.browser_content)
+        val searchContent = root.findViewById<View?>(R.id.search_view_content_container)
+        // Keep the app-bar surface solid, and fade its controls beneath the status icons.
+        val statusBarScrim =
+            if (useSearchView) {
+                BrowserStatusBarDrawable(root, requireNotNull(appBar)).apply {
+                    root.overlay.add(this)
+                    appBar.addOnOffsetChangedListener(
+                        AppBarLayout.OnOffsetChangedListener { _, _ -> invalidateSelf() },
+                    )
+                    appBar.addLiftOnScrollProgressListener(
+                        object : AppBarLayout.LiftOnScrollProgressListener() {
+                            override fun onUpdate(
+                                elevation: Float,
+                                backgroundColor: Int,
+                                progress: Float,
+                            ) {
+                                // Keep the solid surface synchronized with the app bar's animation.
+                                color = backgroundColor
+                            }
+                        },
+                    )
+                    root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                        setBounds(0, 0, root.width, bounds.height())
+                    }
+                }
+            } else {
+                null
+            }
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(systemBars() or displayCutout() or ime())
-            v.updatePadding(left = bars.left, right = bars.right)
-            toolbarContainer?.updatePadding(top = bars.top)
+            statusBarScrim?.setBounds(0, 0, v.width, insets.getInsets(statusBars()).top)
+            if (useSearchView) {
+                // Keep the full-screen SearchView edge to edge: Material insets its own toolbar.
+                topInset?.updateLayoutParams { height = bars.top }
+                appBar?.updatePadding(left = bars.left, right = bars.right)
+                browserContent?.updatePadding(left = bars.left, right = bars.right)
+            } else {
+                v.updatePadding(left = bars.left, right = bars.right)
+                toolbarContainer?.updatePadding(top = bars.top)
+            }
             // The bottom of the safe area is above the navigation bar, rounded display corners and keyboard.
             // When scrolled to the bottom of the scrollbar should be aligned with the last row.
             // Embedded content already ends above the bottom navigation, including its system-bar inset.
@@ -498,6 +627,7 @@ class CardBrowserFragment :
                 if (activity is CardBrowser) maxOf(bars.bottom, insets.bottomCornerClearance(v)) else 0
             // Due to clipToPadding=false, only the last row is affected
             cardsListView.updatePadding(bottom = safeAreaBottom)
+            searchContent?.updatePadding(left = bars.left, right = bars.right, bottom = safeAreaBottom)
             // The scrollbar track stays full-height (edge to edge); only the handle is kept above
             // the safe-area boundary so it remains touchable and aligns with the last row.
             browserScroller.handleBottomInset = safeAreaBottom
@@ -553,6 +683,9 @@ class CardBrowserFragment :
                     if (vm.isInMultiSelectMode) return
                     Timber.d("onCreateMenu()")
                     menuInflater.inflate(R.menu.card_browser, menu)
+
+                    menu.wireUndoItemRtlCompliantAction { onMenuItemSelected(it) }
+
                     menu.findItem(R.id.action_search_by_flag).subMenu?.setupFlags()
                     // note: this menu item is available with and without a selection of items
                     menu.findItem(R.id.action_find_replace)?.title = TR.sentenceCase.findAndReplace
@@ -598,7 +731,7 @@ class CardBrowserFragment :
                                         }
 
                                         override fun onQueryTextSubmit(query: String): Boolean {
-                                            vm.setQuery(query, fromUserSearch = true)
+                                            vm.setQuery(query, feedbackMode = BrowserSearchFeedbackMode.SEARCH_RESULTS)
                                             legacySearchView!!.clearFocus()
                                             return true
                                         }
@@ -728,8 +861,10 @@ class CardBrowserFragment :
                 ) {
                     if (!activityViewModel.isInMultiSelectMode) return
                     menuInflater.inflate(R.menu.card_browser_multiselect, menu)
+
+                    menu.wireUndoItemRtlCompliantAction { onMenuItemSelected(it) }
+
                     menu.findItem(R.id.action_flag).subMenu?.setupFlags()
-                    requireContext().increaseHorizontalPaddingOfOverflowMenuIcons(menu)
                 }
 
                 override fun onPrepareMenu(menu: Menu) {
@@ -758,7 +893,7 @@ class CardBrowserFragment :
                     }
                     menu.findItem(R.id.action_mark_card).apply {
                         title = TR.sentenceCase.toggleMark
-                        setPaddedIcon(requireContext(), R.drawable.ic_star_border_white)
+                        setIcon(R.drawable.ic_star_border_white)
                         isVisible = vm.hasSelectedAnyRows()
                     }
                     menu.findItem(R.id.action_change_note_type).apply {
@@ -934,6 +1069,13 @@ class CardBrowserFragment :
             menu.findItem(R.id.action_show_suspended)?.isVisible = false
             menu.findItem(R.id.action_sort_by_size)?.isVisible = false
         }
+
+        menuHost.addPrepareMenuProvider { menu ->
+            if (activityViewModel.isInMultiSelectMode) {
+                // Apply overflow padding after 'Preview' is a search-bar button.
+                requireContext().increaseHorizontalPaddingOfOverflowMenuIcons(menu)
+            }
+        }
     }
 
     override fun onStart() {
@@ -1004,48 +1146,39 @@ class CardBrowserFragment :
             }
         }
 
-        fun onSearchCompleted(state: SearchState.Completed) {
-            // #3592: show the number of cards found the number of cards is not visible in the menu
-            val isMenuSubtitleVisible = legacySearchView != null && legacySearchView!!.isIconified
-
-            fun showSnackbar(
-                message: String,
-                searchAllDecks: Boolean,
-            ) {
-                // Don't show a snackbar if the results are visible in the header.
-                // But do show the snackbar if an action is available
-                if (isMenuSubtitleVisible && !searchAllDecks) return
-
-                showSnackbar(message, Snackbar.LENGTH_SHORT) {
-                    if (!searchAllDecks) return@showSnackbar
+        fun onSearchFeedback(state: SearchState.Completed) {
+            if (!activityViewModel.consumeSearchFeedback(state)) return
+            val subtitle = legacySubtitle ?: requireActivity().findViewById<TextView>(R.id.subtitle)
+            val feedback =
+                browserSearchFeedback(
+                    feedbackMode = state.feedbackMode,
+                    rowCount = state.rowCount,
+                    allDecksSelected = state.allDecksSelected,
+                    isHeaderCountVisible = subtitle?.isShown == true && legacySearchView?.isIconified != false,
+                )
+            val message =
+                when (feedback) {
+                    BrowserSearchFeedback.NONE -> return
+                    BrowserSearchFeedback.COUNT, BrowserSearchFeedback.COUNT_WITH_SEARCH_ALL_DECKS -> state.formatCardCount(resources)
+                    BrowserSearchFeedback.NO_CARDS_IN_SELECTED_DECK ->
+                        getString(CommonString.card_browser_no_cards_in_deck, selectedDeckNameForUi)
+                }
+            showSnackbar(message, Snackbar.LENGTH_SHORT) {
+                if (feedback.offersSearchAllDecks) {
                     setAction(CommonString.card_browser_search_all_decks) {
-                        activityViewModel.setSelectedDeck(SelectableDeck.AllDecks)
+                        activityViewModel.setSelectedDeck(SelectableDeck.AllDecks, feedbackMode = BrowserSearchFeedbackMode.SEARCH_RESULTS)
                     }
                 }
-            }
-
-            when (val result = state.resultMessage) {
-                // no message for browser open / deck change / order change: only user searches
-                null -> return
-                is SearchResultMessage.CardCount ->
-                    showSnackbar(
-                        message = state.formatCardCount(resources),
-                        searchAllDecks = result.includeSearchAllDecksAction,
-                    )
-                SearchResultMessage.NoCardsInSelectedDeck ->
-                    showSnackbar(
-                        getString(CommonString.card_browser_no_cards_in_deck, selectedDeckNameForUi),
-                        searchAllDecks = true,
-                    )
             }
         }
 
         fun searchStateChanged(searchState: SearchState) {
             cardsAdapter.refreshRows()
             progressIndicator.isVisible = searchState == Initializing || searchState == Searching
-            if (searchState is SearchState.Completed) {
-                onSearchCompleted(searchState)
-                invalidateMenu()
+            when (searchState) {
+                Initializing, Searching -> { }
+                is SearchState.Completed -> invalidateMenu()
+                is SearchState.Error -> requireContext().showSearchError(searchState.error)
             }
         }
 
@@ -1126,11 +1259,21 @@ class CardBrowserFragment :
             if (searchView == null) return
 
             val standard = getOrCreateSearchFragment(StandardSearchFragment.TAG, ::StandardSearchFragment)
-            val advanced = getOrCreateSearchFragment(AdvancedSearchFragment.TAG, ::AdvancedSearchFragment)
+            val advanced =
+                if (inAdvancedSearch) {
+                    getOrCreateSearchFragment(AdvancedSearchFragment.TAG, ::AdvancedSearchFragment)
+                } else {
+                    childFragmentManager.findFragmentByTag(AdvancedSearchFragment.TAG)
+                }
 
             childFragmentManager.commit {
-                hide(if (inAdvancedSearch) standard else advanced)
-                show(if (inAdvancedSearch) advanced else standard)
+                if (inAdvancedSearch) {
+                    hide(standard)
+                    show(requireNotNull(advanced))
+                } else {
+                    advanced?.let { hide(it) }
+                    show(standard)
+                }
             }
         }
 
@@ -1150,11 +1293,14 @@ class CardBrowserFragment :
 
         @NeedsTest("displayed filter")
         fun onSearchSubmitted(value: SearchRequest) {
+            // Queued search updates can arrive after finish(), before the lifecycle stops.
+            if (activity?.isFinishing == true) return
+
             // WARN: This changes the text when the SearchView is open
             launchCatchingTask { searchBar?.setText(value.toUserSpannable()) }
 
             Timber.i("relaying submitted search to activity")
-            activityViewModel.launchSearchForCards(value, forceRefresh = false, fromUserSearch = true)
+            activityViewModel.launchSearchForCards(value, forceRefresh = false, feedbackMode = BrowserSearchFeedbackMode.SEARCH_RESULTS)
         }
 
         fun onUserMessage(message: UserMessage) =
@@ -1198,15 +1344,7 @@ class CardBrowserFragment :
             tagsChip?.hasCheckedBackground = filters.tags.any()
 
             cardStateChip?.text = formatChipDescription(filters.cardStates.map { it.label }, emptyValue = "Card state")
-            cardStateChip?.chipIcon =
-                ContextCompat.getDrawable(requireContext(), filters.cardStates.firstOrNull().iconRes)?.also {
-                    if (filters.cardStates.isEmpty()) {
-                        DrawableCompat.setTint(
-                            it.mutate(),
-                            MaterialColors.getColor(requireContext(), androidx.appcompat.R.attr.colorPrimary, 0),
-                        )
-                    }
-                }
+            cardStateChip?.chipIcon = filters.cardStates.firstOrNull().getIcon(requireContext())
             cardStateChip?.hasCheckedBackground = filters.cardStates.any()
 
             // Flags: Use the icon/checked state to explain what the filter is.
@@ -1270,40 +1408,51 @@ class CardBrowserFragment :
             sortChip?.contentDescription = sort?.let(::describeSort) ?: getString(CommonString.card_browser_change_display_order_title)
         }
 
-        activityViewModel.flowOfReverseDirection.launchCollectionInLifecycleScope(::reverseDirectionChanged)
-        activityViewModel.flowOfIsTruncated.launchCollectionInLifecycleScope(::onIsTruncatedChanged)
-        activityViewModel.flowOfSelectedRows.launchCollectionInLifecycleScope(::onSelectedRowsChanged)
-        activityViewModel.flowOfPaneRow.launchCollectionInLifecycleScope(::onPaneRowChanged)
-        activityViewModel.flowOfActiveColumns.launchCollectionInLifecycleScope(::onColumnsChanged)
-        activityViewModel.flowOfCardsUpdated.launchCollectionInLifecycleScope(::cardsUpdatedChanged)
-        activityViewModel.flowOfMultiSelectModeChanged.launchCollectionInLifecycleScope(::onMultiSelectModeChanged)
-        activityViewModel.flowOfSearchState.launchCollectionInLifecycleScope(::searchStateChanged)
-        activityViewModel.flowOfLastCompletedSearch.filterNotNull().launchCollectionInLifecycleScope(::onLastCompletedSearchChanged)
-        activityViewModel.flowOfColumnHeadings.launchCollectionInLifecycleScope(::onColumnNamesChanged)
-        activityViewModel.flowOfCardStateChanged.launchCollectionInLifecycleScope(::onCardsMarkedEvent)
-        activityViewModel.flowOfToggleSelectionState.launchCollectionInLifecycleScope(::onToggleSelectionStateUpdated)
-        viewModel.flowOfSearchForDecks.launchCollectionInLifecycleScope(::onSearchForDecks)
-        activityViewModel.flowOfScrollRequest.launchCollectionInLifecycleScope(::autoScrollTo)
-        activityViewModel.flowOfCanSearch.launchCollectionInLifecycleScope(::onCanSaveChanged)
-        searchViewModel.advancedSearchFlow.launchCollectionInLifecycleScope(::advancedSearchChanged)
-        searchViewModel.searchTextFlow.launchCollectionInLifecycleScope(::onSearchViewTextChanged)
-        searchViewModel.closeSearchViewFlow.launchCollectionInLifecycleScope(::onSearchViewClosed)
-        searchViewModel.submittedSearchFlow.filterNotNull().launchCollectionInLifecycleScope(::onSearchSubmitted)
-        searchViewModel.userMessageFlow.filterNotNull().launchCollectionInLifecycleScope(::onUserMessage)
-        activityViewModel.searchRequestFlow.launchCollectionInLifecycleScope(::onSearchRequestUpdated)
-        activityViewModel.flowOfChangeNoteType.launchCollectionInLifecycleScope(::onChangeNoteType)
-        activityViewModel.flowOfSaveSearchNamePrompt.launchCollectionInLifecycleScope(::onSaveSearchNamePrompt)
-        activityViewModel.flowOfSortTypeChanged.launchCollectionInLifecycleScope(::onSortTypeChanged)
-        activityViewModel.flowOfCurrentSort.launchCollectionInLifecycleScope(::onCurrentSortChanged)
+        fun onLaunchNoteEditor(command: NoteEditorCommand.LaunchActivity) {
+            navigate(command.destination)
+        }
+
+        activityViewModel.flowOfReverseDirection.collectInLifecycle(::reverseDirectionChanged)
+        activityViewModel.flowOfIsTruncated.collectInLifecycle(::onIsTruncatedChanged)
+        activityViewModel.flowOfSelectedRows.collectInLifecycle(::onSelectedRowsChanged)
+        activityViewModel.flowOfPaneRow.collectInLifecycle(::onPaneRowChanged)
+        activityViewModel.flowOfActiveColumns.collectInLifecycle(::onColumnsChanged)
+        activityViewModel.flowOfCardsUpdated.collectInLifecycle(::cardsUpdatedChanged)
+        activityViewModel.flowOfMultiSelectModeChanged.collectInLifecycle(::onMultiSelectModeChanged)
+        activityViewModel.flowOfSearchState.collectInLifecycle(::searchStateChanged)
+        activityViewModel.flowOfSearchFeedback.filterNotNull().collectInLifecycle(::onSearchFeedback)
+        activityViewModel.flowOfLastCompletedSearch.filterNotNull().collectInLifecycle(::onLastCompletedSearchChanged)
+        activityViewModel.flowOfColumnHeadings.collectInLifecycle(::onColumnNamesChanged)
+        activityViewModel.flowOfCardStateChanged.collectInLifecycle(::onCardsMarkedEvent)
+        activityViewModel.flowOfToggleSelectionState.collectInLifecycle(::onToggleSelectionStateUpdated)
+        viewModel.flowOfSearchForDecks.collectInLifecycle(::onSearchForDecks)
+        activityViewModel.flowOfScrollRequest.collectInLifecycle(::autoScrollTo)
+        activityViewModel.flowOfCanSearch.collectInLifecycle(::onCanSaveChanged)
+        searchViewModel.advancedSearchFlow.collectInLifecycle(::advancedSearchChanged)
+        searchViewModel.searchTextFlow.collectInLifecycle(::onSearchViewTextChanged)
+        searchViewModel.closeSearchViewFlow.collectInLifecycle(::onSearchViewClosed)
+        // Since the Browse tab is phone-only, we don't accept side-by-side (tablet) requests
+        if (isHostedInBottomNavigation()) {
+            activityViewModel.flowOfNoteEditorCommand
+                .filterIsInstance<NoteEditorCommand.LaunchActivity>()
+                .collectInLifecycle(::onLaunchNoteEditor)
+        }
+        searchViewModel.submittedSearchFlow.filterNotNull().collectInLifecycle(::onSearchSubmitted)
+        searchViewModel.userMessageFlow.filterNotNull().collectInLifecycle(::onUserMessage)
+        activityViewModel.searchRequestFlow.collectInLifecycle(::onSearchRequestUpdated)
+        activityViewModel.flowOfChangeNoteType.collectInLifecycle(::onChangeNoteType)
+        activityViewModel.flowOfSaveSearchNamePrompt.collectInLifecycle(::onSaveSearchNamePrompt)
+        activityViewModel.flowOfSortTypeChanged.collectInLifecycle(::onSortTypeChanged)
+        activityViewModel.flowOfCurrentSort.collectInLifecycle(::onCurrentSortChanged)
     }
 
     private fun setupFragmentResultListeners() {
         ankiActivity.setFragmentResultListener(REQUEST_REPOSITION_NEW_CARDS) { _, bundle ->
             repositionCardsNoValidation(
-                position = bundle.getInt(RepositionCardFragment.ARG_POSITION),
-                step = bundle.getInt(RepositionCardFragment.ARG_STEP),
-                shuffle = bundle.getBoolean(RepositionCardFragment.ARG_RANDOM),
-                shift = bundle.getBoolean(RepositionCardFragment.ARG_SHIFT),
+                position = bundle.getInt(RepositionCardFragment.RESULT_POSITION),
+                step = bundle.getInt(RepositionCardFragment.RESULT_STEP),
+                shuffle = bundle.getBoolean(RepositionCardFragment.RESULT_RANDOM),
+                shift = bundle.getBoolean(RepositionCardFragment.RESULT_SHIFT),
             )
         }
     }
@@ -1564,6 +1713,17 @@ class CardBrowserFragment :
             undoAndShowSnackbar()
         }
 
+    /**
+     * Wires the Undo menu item's [RtlCompliantActionProvider] click handler
+     * to [onMenuItemSelected].
+     */
+    private fun Menu.wireUndoItemRtlCompliantAction(onMenuItemSelected: (MenuItem) -> Boolean) {
+        val undoItem = findItem(R.id.action_undo) ?: return
+        val undoItemRtlCompliantActionProvider = MenuItemCompat.getActionProvider(undoItem) as? RtlCompliantActionProvider
+
+        undoItemRtlCompliantActionProvider?.clickHandler = { _, _ -> onMenuItemSelected(undoItem) }
+    }
+
     fun displayCardInfo() =
         launchCatchingTask {
             activityViewModel.queryCardInfoDestination()?.let { destination ->
@@ -1703,7 +1863,7 @@ class CardBrowserFragment :
         val (type, selectedIds) = activityViewModel.querySelectionExportData() ?: return
         ExportDialogFragment
             .newInstance(
-                requireContext().externalCacheDir ?: requireContext().cacheDir,
+                IdsFile.getDirectory(),
                 type,
                 selectedIds,
             ).show(parentFragmentManager, "exportDialog")
@@ -1715,42 +1875,18 @@ class CardBrowserFragment :
     }
 
     fun showFilteredDeckScreen() {
-        launchCatchingTask {
+        // an invalid query is the user's input, so show the error without a crash report
+        launchCatchingTask(skipCrashReport = { it is InvalidSearchException }) {
             withProgress {
-                val currentSearch = activityViewModel.searchTerms
-                // the desktop browser only adds a deck if it's directly selected while we select a
-                // deck outside the search box. So we need to look at the current search string
-                // and manually set a deck if one is not found
-                val search =
-                    if (currentSearch.isNotEmpty()) {
-                        if (currentSearch.contains("deck:")) {
-                            currentSearch
-                        } else {
-                            "${buildDeckNameSearch()} $currentSearch"
-                        }
-                    } else {
-                        buildDeckNameSearch()
-                    }
-                val intent = FilteredDeckOptionsFragment.getIntent(requireContext(), search = search)
+                // the selected deck sits outside the search box, so build the same search the
+                // browser uses, which combines the query and the filters via the backend
+                val searchRequest = activityViewModel.searchRequestFlow.value
+                val search = withCol { searchRequest.toSearchString().getOrThrow() }
+                val intent = FilteredDeckOptionsFragment.getIntent(requireContext(), search = search.value)
                 startActivity(intent)
             }
         }
     }
-
-    /**
-     * Returns a search string for the current selected deck to be used for building a filtered
-     * deck in the form of "deck:A". If the selected deck is "All Decks" then return a general deck
-     * search string.
-     */
-    private suspend fun buildDeckNameSearch(): String? =
-        if (activityViewModel.deckId == ALL_DECKS_ID) {
-            "deck:_*"
-        } else {
-            activityViewModel.deckId?.let {
-                // decks.name() returns 'no deck' if a deck doesn't exist for that did
-                "\"deck:${withCol { decks.get(it, default = true)?.name }}\""
-            }
-        }
 
     fun changeDisplayOrder() =
         launchCatchingTask {
@@ -1834,11 +1970,9 @@ class CardBrowserFragment :
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     fun showFindAndReplaceDialog() {
         lifecycleScope.launch {
-            withProgress {
-                val noteIds = activityViewModel.queryAllSelectedNoteIds()
-                val fragment = FindAndReplaceDialogFragment.newInstance(requireContext(), noteIds)
-                fragment.show(parentFragmentManager, FindAndReplaceDialogFragment.TAG)
-            }
+            val noteIds = activityViewModel.loadFindAndReplaceNoteIds()
+            val fragment = FindAndReplaceDialogFragment.newInstance(requireContext(), noteIds)
+            fragment.show(parentFragmentManager, FindAndReplaceDialogFragment.TAG)
         }
     }
 
@@ -1918,7 +2052,11 @@ class CardBrowserFragment :
                             tags = selectedTags,
                         ),
                 )
-            activityViewModel.launchSearchForCards(updatedSearch, forceRefresh = false)
+            activityViewModel.launchSearchForCards(
+                updatedSearch,
+                forceRefresh = false,
+                feedbackMode = BrowserSearchFeedbackMode.SEARCH_RESULTS,
+            )
         } else {
             activityViewModel.filterByTags(selectedTags, cardState)
         }

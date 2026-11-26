@@ -15,6 +15,7 @@ import com.ichi2.anki.Flag
 import com.ichi2.anki.Reviewer
 import com.ichi2.anki.asyncIO
 import com.ichi2.anki.cardviewer.SingleCardSide
+import com.ichi2.anki.cardviewer.appendNoSuggestAttributes
 import com.ichi2.anki.common.annotations.NeedsTest
 import com.ichi2.anki.common.destinations.BrowserDestination
 import com.ichi2.anki.common.destinations.CardInfoDestination
@@ -34,7 +35,6 @@ import com.ichi2.anki.libanki.sched.CurrentQueueState
 import com.ichi2.anki.libanki.undoLabel
 import com.ichi2.anki.observability.ChangeManager
 import com.ichi2.anki.observability.undoableOp
-import com.ichi2.anki.pages.AnkiServer
 import com.ichi2.anki.pages.PostRequestUri
 import com.ichi2.anki.preferences.reviewer.ViewerAction
 import com.ichi2.anki.previewer.CardViewerViewModel
@@ -67,6 +67,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import org.intellij.lang.annotations.Language
 import timber.log.Timber
+import kotlin.time.Duration.Companion.seconds
 import com.ichi2.anki.common.destinations.Destination as NavigateDestination
 
 class ReviewerViewModel(
@@ -111,7 +112,6 @@ class ReviewerViewModel(
     val pageDownFlow = MutableSharedFlow<Unit>()
     val statesMutationEvalFlow = MutableSharedFlow<String>()
 
-    override val server: AnkiServer = AnkiServer(this, repository.getServerPort()).also { it.start() }
     private val stateMutationKey = repository.generateStateMutationKey()
     private val stateMutationJs: Deferred<String> = asyncIO { repository.getCustomSchedulingJs() }
     private var typedAnswer = ""
@@ -217,7 +217,7 @@ class ReviewerViewModel(
         } else {
             typedAnswerResult.complete("")
         }
-        typedAnswer = withTimeoutOrNull(1000L) {
+        typedAnswer = withTimeoutOrNull(1.seconds) {
             typedAnswerResult.await()
         } ?: ""
 
@@ -350,7 +350,7 @@ class ReviewerViewModel(
     private suspend fun deleteNote() {
         val cardId = currentCard.await().id
         val noteCount =
-            undoableOp {
+            undoableOp(handler = this) {
                 removeNotes(cardIds = listOf(cardId))
             }.count
         actionFeedbackFlow.emit(TR.browsingCardsDeleted(noteCount))
@@ -360,7 +360,7 @@ class ReviewerViewModel(
     private suspend fun buryCard() {
         val cardId = currentCard.await().id
         val noteCount =
-            undoableOp {
+            undoableOp(handler = this) {
                 sched.buryCards(cids = listOf(cardId))
             }.count
         actionFeedbackFlow.emit(TR.studyingCardsBuried(noteCount))
@@ -370,7 +370,7 @@ class ReviewerViewModel(
     private suspend fun buryNote() {
         val noteId = currentCard.await().nid
         val noteCount =
-            undoableOp {
+            undoableOp(handler = this) {
                 sched.buryNotes(nids = listOf(noteId))
             }.count
         actionFeedbackFlow.emit(TR.studyingCardsBuried(noteCount))
@@ -379,7 +379,7 @@ class ReviewerViewModel(
 
     private suspend fun suspendCard() {
         val cardId = currentCard.await().id
-        undoableOp {
+        undoableOp(handler = this) {
             sched.suspendCards(ids = listOf(cardId))
         }.count
         actionFeedbackFlow.emit(TR.studyingCardSuspended())
@@ -388,7 +388,7 @@ class ReviewerViewModel(
 
     private suspend fun suspendNote() {
         val noteId = currentCard.await().nid
-        undoableOp {
+        undoableOp(handler = this) {
             sched.suspendNotes(ids = listOf(noteId))
         }
         actionFeedbackFlow.emit(TR.studyingNoteSuspended())
@@ -630,12 +630,18 @@ class ReviewerViewModel(
         text: String,
         typeAnswer: TypeAnswer,
     ): String {
+        val keyboardAttributes =
+            buildString {
+                if (typeAnswer.noSuggest) appendNoSuggestAttributes()
+            }
+
         @Suppress("XmlDeprecatedElement") // upstream uses `<center>`
         @Language("HTML")
         val repl =
             """
             <center>
             <input type="text" id="typeans" onkeydown="ankidroid.onTypeAnswerKeyDown(event);" 
+               $keyboardAttributes
                style="font-family: '${typeAnswer.font}'; font-size: ${typeAnswer.fontSize}px;">
             </center>
             """.trimIndent()

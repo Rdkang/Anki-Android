@@ -6,10 +6,12 @@ package com.ichi2.anki.shareddeck
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.database.Cursor
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -21,6 +23,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AlertDialog
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.content.ContextCompat
@@ -37,13 +40,15 @@ import com.ichi2.anki.CommonString
 import com.ichi2.anki.IntentHandler
 import com.ichi2.anki.R
 import com.ichi2.anki.common.android.AnkiBroadcastReceiver
+import com.ichi2.anki.common.android.animationEnabled
 import com.ichi2.anki.common.crashreporting.CrashReportService
 import com.ichi2.anki.common.time.TimeManager
 import com.ichi2.anki.common.utils.android.showThemedToast
 import com.ichi2.anki.compat.CompatHelper.Companion.getSerializableCompat
 import com.ichi2.anki.compat.CompatHelper.Companion.registerReceiverCompat
-import com.ichi2.anki.shareddeck.SharedDecksActivity.Companion.DOWNLOAD_FILE
+import com.ichi2.anki.shareddeck.SharedDecksActivity.Companion.ARG_DOWNLOAD_FILE
 import com.ichi2.anki.snackbar.showSnackbar
+import com.ichi2.anki.utils.ext.collectInLifecycle
 import com.ichi2.anki.utils.openUrl
 import com.ichi2.compose.theme.AnkiDroidTheme
 import com.ichi2.utils.ImportUtils
@@ -63,13 +68,13 @@ import com.ichi2.anki.common.android.R as CommonR
 class SharedDecksDownloadFragment : Fragment() {
     private val viewModel: SharedDecksDownloadViewModel by viewModels()
 
-    private val fileToBeDownloaded by lazy { arguments?.getSerializableCompat<DownloadFile>(DOWNLOAD_FILE)!! }
+    private val fileToBeDownloaded by lazy { arguments?.getSerializableCompat<DownloadFile>(ARG_DOWNLOAD_FILE)!! }
 
     private var downloadId: Long = 0
 
     private var fileName: String? = null
 
-    private var completedFile: File? = null
+    private var completedDeck: Uri? = null
 
     private var handler: Handler = Handler(Looper.getMainLooper())
     private var isProgressCheckerRunning = false
@@ -151,15 +156,17 @@ class SharedDecksDownloadFragment : Fragment() {
             setContent {
                 AnkiDroidTheme {
                     val state by viewModel.uiState.collectAsStateWithLifecycle()
+                    val animationsEnabled = remember { requireActivity().animationEnabled() }
                     SharedDecksDownloadScreen(
                         state = state,
+                        animationsEnabled = animationsEnabled,
                         onCancelClick = {
                             Timber.i("Cancel download button clicked")
                             showCancelConfirmationDialog()
                         },
                         onImportClick = {
                             Timber.i("Import deck button clicked")
-                            completedFile?.let { openDownloadedDeck(requireContext(), it) }
+                            completedDeck?.let { openDownloadedDeck(requireContext(), it) }
                         },
                         onTryAgainClick = ::retryDownload,
                         onOpenInBrowserClick = ::openInBrowser,
@@ -175,7 +182,26 @@ class SharedDecksDownloadFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         downloadManager = (activity as SharedDecksActivity).downloadManager
         registerDownloadReceiver()
+        observeLoginRequired()
         downloadFile(fileToBeDownloaded)
+    }
+
+    /**
+     * Handles the [DownloadPhase.LoginRequired] phase: shows the login prompt and returns to
+     * the shared decks WebView.
+     *
+     * Handled in this collector rather than in the broadcast receiver which records the
+     * state: the receiver can fire while the activity is backgrounded, where
+     * FragmentManager work would throw, while this only runs while the screen is showing.
+     */
+    private fun observeLoginRequired() {
+        viewModel.uiState.collectInLifecycle { state ->
+            if (state.phase == DownloadPhase.LoginRequired) {
+                Timber.i("Download requires login, returning to shared decks")
+                (activity as SharedDecksActivity).showLoginRequiredDialog()
+                parentFragmentManager.popBackStack()
+            }
+        }
     }
 
     override fun onDestroyView() {
@@ -234,11 +260,17 @@ class SharedDecksDownloadFragment : Fragment() {
         }
         val currentFileName = fileToBeDownloaded.toFileName(extension = "apkg")
 
-        val downloadRequest = generateDeckDownloadRequest(fileToBeDownloaded, currentFileName)
-
-        completedFile = null
+        completedDeck = null
         // Store unique download ID to be used when onReceiveBroadcast() of AnkiBroadcastReceiver gets executed.
-        downloadId = downloadManager.enqueue(downloadRequest)
+        downloadId =
+            try {
+                enqueueDownload(fileToBeDownloaded, currentFileName)
+            } catch (e: SecurityException) {
+                CrashReportService.sendExceptionReport(e, "SharedDecksDownloadFragment::downloadFile")
+                viewModel.onDownloadStarted(currentFileName)
+                onDownloadFinished(DownloadOutcome.Failed)
+                return
+            }
         fileName = currentFileName
         isDownloadInProgress = true
         onBackPressedCallback.isEnabled = isDownloadInProgress
@@ -246,6 +278,24 @@ class SharedDecksDownloadFragment : Fragment() {
         Timber.d("File name -> $fileName")
         viewModel.onDownloadStarted(currentFileName)
         startDownloadProgressChecker()
+    }
+
+    private fun enqueueDownload(
+        fileToBeDownloaded: DownloadFile,
+        currentFileName: String,
+    ): Long {
+        val request =
+            generateDeckDownloadRequest(fileToBeDownloaded, currentFileName).setDestinationInExternalFilesDir(
+                context,
+                null,
+                "$SHARED_DECKS_DOWNLOAD_FOLDER/$currentFileName",
+            )
+        return try {
+            downloadManager.enqueue(request)
+        } catch (_: SecurityException) {
+            Timber.w("DownloadManager rejected the app folder, downloading into its own storage")
+            downloadManager.enqueue(generateDeckDownloadRequest(fileToBeDownloaded, currentFileName))
+        }
     }
 
     private fun generateDeckDownloadRequest(
@@ -263,11 +313,6 @@ class SharedDecksDownloadFragment : Fragment() {
         request.setTitle(currentFileName)
 
         request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-        request.setDestinationInExternalFilesDir(
-            context,
-            null,
-            "$SHARED_DECKS_DOWNLOAD_FOLDER/$currentFileName",
-        )
 
         return request
     }
@@ -286,9 +331,9 @@ class SharedDecksDownloadFragment : Fragment() {
                 Timber.i("Download might be complete now, verify and continue with import")
 
                 /**
-                 * @return The completed download's file, or null if it cannot be imported.
+                 * @return The completed download's location, or null if it cannot be imported.
                  */
-                fun getImportableDeck(): File? {
+                fun getImportableDeck(): Uri? {
                     if (fileName == null) {
                         // Send ACRA report
                         CrashReportService.sendExceptionReport(
@@ -309,7 +354,7 @@ class SharedDecksDownloadFragment : Fragment() {
                     // Halt execution if file doesn't have extension as 'apkg' or 'colpkg'
                     if (!ImportUtils.isFileAValidDeck(fileName!!)) {
                         Timber.i("File does not have 'apkg' or 'colpkg' extension, abort the deck opening task")
-                        onDownloadFinished(isSuccessful = false, isInvalidDeckFile = true)
+                        onDownloadFinished(DownloadOutcome.InvalidDeckFile)
                         return null
                     }
 
@@ -321,7 +366,7 @@ class SharedDecksDownloadFragment : Fragment() {
                         // Return if cursor is empty.
                         if (!it.moveToFirst()) {
                             Timber.i("Empty cursor, cannot continue further with success check and deck import")
-                            onDownloadFinished(isSuccessful = false)
+                            onDownloadFinished(DownloadOutcome.Failed)
                             return null
                         }
 
@@ -331,8 +376,18 @@ class SharedDecksDownloadFragment : Fragment() {
                         // Return if download was not successful.
                         if (it.getInt(columnStatusIndex) != DownloadManager.STATUS_SUCCESSFUL) {
                             Timber.i("Download could not be successful, update UI")
-                            Timber.d("Status code -> ${it.getIntOrNull(columnStatusIndex)}, reason ${it.getIntOrNull(columnReasonIndex)}")
-                            onDownloadFinished(isSuccessful = false)
+                            val reason = it.getIntOrNull(columnReasonIndex)
+                            Timber.d("Status code -> ${it.getIntOrNull(columnStatusIndex)}, reason $reason")
+                            // DownloadManager reports the HTTP status code in COLUMN_REASON for 4xx/5xx
+                            // failures: AnkiWeb replies 429 when an anonymous user has used up its
+                            // download limit, asking them to log in (19876)
+                            // a logged-in user is rate limited too ('Daily limit exceeded'), but cannot
+                            // fix that by logging in, so only a logged-out user is sent the login prompt
+                            val isLoginRequired =
+                                reason == SharedDecksActivity.HTTP_STATUS_TOO_MANY_REQUESTS && !isLoggedInToAnkiWeb()
+                            onDownloadFinished(
+                                if (isLoginRequired) DownloadOutcome.LoginRequired else DownloadOutcome.Failed,
+                            )
                             return null
                         }
 
@@ -340,39 +395,39 @@ class SharedDecksDownloadFragment : Fragment() {
                         val localUri = it.getString(it.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
                         if (localUri == null) {
                             Timber.w("Completed download has no local URI")
-                            onDownloadFinished(isSuccessful = false)
+                            onDownloadFinished(DownloadOutcome.Failed)
                             return null
                         }
-                        return localUri.toUri().toFile()
+                        return localUri.toUri()
                     }
                 }
 
-                val downloadedFile =
+                val downloadedDeck =
                     try {
                         getImportableDeck()
                     } catch (exception: Exception) {
                         Timber.w(exception)
-                        onDownloadFinished(isSuccessful = false)
+                        onDownloadFinished(DownloadOutcome.Failed)
                         return
                     }
 
-                if (downloadedFile == null) {
+                if (downloadedDeck == null) {
                     // Could be a retryable fault (we received notification of another file)
                     // Otherwise, onDownloadFinished should have been called
                     // to update the UI
                     return
                 }
 
-                completedFile = downloadedFile
+                completedDeck = downloadedDeck
 
                 // the progress checker can stop before it sees 100%, so complete it here
                 viewModel.onDownloadComplete()
 
                 Timber.i("Opening downloaded deck for import")
-                openDownloadedDeck(context, downloadedFile)
+                openDownloadedDeck(context, downloadedDeck)
 
                 Timber.d("Download finished")
-                onDownloadFinished(isSuccessful = true)
+                onDownloadFinished(DownloadOutcome.Success)
             }
         }
 
@@ -482,25 +537,30 @@ class SharedDecksDownloadFragment : Fragment() {
      */
     private fun openDownloadedDeck(
         context: Context,
-        downloadedFile: File,
+        downloadedDeck: Uri,
     ) {
-        // A successful DownloadManager entry can outlive its file, e.g. after another import.
-        if (!downloadedFile.isFile) {
-            Timber.w("Downloaded shared deck no longer exists")
-            onDownloadFinished(isSuccessful = false)
-            return
-        }
+        val fileUri =
+            if (downloadedDeck.scheme == ContentResolver.SCHEME_FILE) {
+                val downloadedFile = downloadedDeck.toFile()
+                // A successful DownloadManager entry can outlive its file, e.g. after another import.
+                if (!downloadedFile.isFile) {
+                    Timber.w("Downloaded shared deck no longer exists")
+                    onDownloadFinished(DownloadOutcome.Failed)
+                    return
+                }
+                FileProvider.getUriForFile(
+                    context,
+                    context.packageName + ".apkgfileprovider",
+                    downloadedFile,
+                )
+            } else {
+                downloadedDeck
+            }
 
-        val mimeType = URLConnection.guessContentTypeFromName(downloadedFile.name)
+        val mimeType = URLConnection.guessContentTypeFromName(fileName)
         val fileIntent = Intent(context, IntentHandler::class.java)
         fileIntent.action = Intent.ACTION_VIEW
 
-        val fileUri =
-            FileProvider.getUriForFile(
-                context,
-                context.packageName + ".apkgfileprovider",
-                downloadedFile,
-            )
         Timber.d("File URI -> $fileUri")
         fileIntent.setDataAndType(fileUri, mimeType)
         fileIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -513,22 +573,46 @@ class SharedDecksDownloadFragment : Fragment() {
         }
     }
 
+    /** How a download ended, deciding what [onDownloadFinished] does next. */
+    private enum class DownloadOutcome {
+        /** The download completed and the deck import was started. */
+        Success,
+
+        /** The completed file was not a deck. */
+        InvalidDeckFile,
+
+        /** AnkiWeb rate-limited a logged-out user, so a login is required. */
+        LoginRequired,
+
+        /** The download failed for any other reason; retry is offered. */
+        Failed,
+    }
+
     /**
      * Updates the UI after download completion or failure and marks the download as inactive.
      */
-    private fun onDownloadFinished(
-        isSuccessful: Boolean,
-        isInvalidDeckFile: Boolean = false,
-    ) {
-        if (!isSuccessful) {
-            if (isInvalidDeckFile) {
+    private fun onDownloadFinished(outcome: DownloadOutcome) {
+        when (outcome) {
+            DownloadOutcome.Success -> {}
+
+            DownloadOutcome.InvalidDeckFile -> {
                 Timber.i("File is not a valid deck, hence return from the download screen")
                 if (isVisible) {
                     context?.let { showThemedToast(it, CommonString.import_log_no_apkg, false) }
                     // Go back if file is not a deck and cannot be imported
                     activity?.onBackPressedDispatcher?.onBackPressed()
                 }
-            } else {
+            }
+
+            DownloadOutcome.LoginRequired -> {
+                Timber.i("Download failed: AnkiWeb requires login to download more decks")
+                // discard the failed download: the login path offers no retry button,
+                // so nothing else would remove it (or its failed-download notification)
+                downloadManager.remove(downloadId)
+                viewModel.onLoginRequired()
+            }
+
+            DownloadOutcome.Failed -> {
                 Timber.i("Download failed, offer a retry")
                 if (isVisible) {
                     context?.let { showThemedToast(it, CommonString.something_wrong, false) }

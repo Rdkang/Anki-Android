@@ -7,12 +7,14 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.os.BadParcelableException
 import androidx.annotation.VisibleForTesting
 import androidx.core.app.NotificationCompat
 import androidx.core.app.PendingIntentCompat
 import androidx.core.content.getSystemService
 import com.ichi2.anki.CollectionManager.withCol
 import com.ichi2.anki.CommonPlurals
+import com.ichi2.anki.CommonPreferenceKey
 import com.ichi2.anki.CommonString
 import com.ichi2.anki.DeckPicker
 import com.ichi2.anki.IntentHandler
@@ -25,6 +27,7 @@ import com.ichi2.anki.common.preferences.sharedPrefs
 import com.ichi2.anki.common.utils.ext.allDecksCounts
 import com.ichi2.anki.libanki.Decks
 import com.ichi2.anki.libanki.EpochMilliseconds
+import com.ichi2.anki.libanki.Utils
 import com.ichi2.anki.libanki.sched.Counts
 import com.ichi2.anki.preferences.PENDING_NOTIFICATIONS_ONLY
 import com.ichi2.anki.reviewreminders.ReviewReminder
@@ -54,6 +57,11 @@ import com.ichi2.anki.common.android.R as CommonR
  *
  * This service can be triggered in one of two possible ways, depending on whether the notification
  * being fired is a recurring notification or a one-time snoozed notification. See [NotificationServiceAction].
+ *
+ * TODO: Rename and reorganize the (handle/send/fire)ReviewReminderNotification functions for better readability and separation of concerns.
+ * These three verbs are way too similar. The "send" method should be split into "validate" and "hydrate". "send" sometimes aborts and does nothing.
+ * The distinction between "handle" and "send" should be made more clear. All uses of "fire" in the codebase, including in documentation,
+ * should be aligned to mean "trigger the OS display unconditionally."
  */
 class NotificationService : AnkiBroadcastReceiver() {
     companion object {
@@ -200,10 +208,13 @@ class NotificationService : AnkiBroadcastReceiver() {
                     }
                 }
             val dueCardsTotal = dueCardsCount.count()
-            if (dueCardsTotal < reviewReminder.cardTriggerThreshold.threshold) {
+            val consideredCardsCount = reviewReminder.thresholdFilter.filterCounts(dueCardsCount)
+            val consideredCardsTotal = consideredCardsCount.count()
+
+            if (consideredCardsTotal < reviewReminder.cardTriggerThreshold.threshold) {
                 Timber.i(
                     "${reminderLogPrefix(reviewReminder.id)} skip: Aborting notification due to cardTriggerThreshold " +
-                        "(due: $dueCardsTotal, threshold: ${reviewReminder.cardTriggerThreshold.threshold})",
+                        "(due: $dueCardsCount, considered: $consideredCardsCount, threshold: ${reviewReminder.cardTriggerThreshold.threshold})",
                 )
                 return
             }
@@ -306,8 +317,8 @@ class NotificationService : AnkiBroadcastReceiver() {
          * Used for the "only notify me if no reviews have been done today" review reminder feature.
          */
         private suspend fun wasScopeReviewedToday(scope: ReviewReminderScope): Boolean {
-            // Handles the global and deck-specific scope cases separately to avoid the need for string concatenation,
-            // thus protecting against SQL injection. Checks for existence rather than counting to increase efficiency.
+            // Handles the global and deck-specific scope cases separately.
+            // Checks for existence rather than counting to increase efficiency.
             val queryResult =
                 when (scope) {
                     is ReviewReminderScope.Global ->
@@ -328,17 +339,20 @@ class NotificationService : AnkiBroadcastReceiver() {
                     is ReviewReminderScope.DeckSpecific ->
                         withCol {
                             val startOfToday: EpochMilliseconds = sched.dayCutoff * 1000 - 1.days.inWholeMilliseconds
-                            // Essentially the same as above, but only check through cards with a deck ID matching the provided scope
+                            // Essentially the same as above, but only check through cards in the provided deck or its subdecks,
+                            // including cards temporarily moved into a filtered deck (whose home deck is stored in odid)
+                            // Deck IDs are numbers, so building the IN list from them is safe
+                            val deckIds = Utils.ids2str(decks.deckAndChildIds(scope.did))
                             val query = """
                         SELECT EXISTS (
                             SELECT 1
                             FROM cards
                             JOIN revlog ON revlog.cid = cards.id
                             WHERE revlog.id > ?
-                            AND cards.did = ?
+                            AND (cards.did IN $deckIds OR cards.odid IN $deckIds)
                         )
                     """
-                            db.queryScalar(query, startOfToday, scope.did)
+                            db.queryScalar(query, startOfToday)
                         }
                 }
             return (queryResult == 1)
@@ -357,7 +371,7 @@ class NotificationService : AnkiBroadcastReceiver() {
             val minCardsDue =
                 preferences
                     .getString(
-                        context.getString(R.string.pref_notifications_minimum_cards_due_key),
+                        context.getString(CommonPreferenceKey.pref_notifications_minimum_cards_due_key),
                         PENDING_NOTIFICATIONS_ONLY.toString(),
                     )!!
                     .toInt()
@@ -489,10 +503,15 @@ class NotificationService : AnkiBroadcastReceiver() {
             Timber.i("${reminderLogPrefix()} NotificationService.onReceiveBroadcast")
             val action = intent.action ?: return
             val extras = intent.extras ?: return
+
             val reviewReminderId =
-                extras.getParcelableCompat<ReviewReminderId>(EXTRA_REVIEW_REMINDER_ID) ?: return
+                rescheduleIfCorrupt(context) {
+                    extras.getParcelableCompat<ReviewReminderId>(EXTRA_REVIEW_REMINDER_ID)
+                } ?: return
             val reviewReminderScope =
-                extras.getParcelableCompat<ReviewReminderScope>(EXTRA_REVIEW_REMINDER_SCOPE) ?: return
+                rescheduleIfCorrupt(context, idForLogging = reviewReminderId) {
+                    extras.getParcelableCompat<ReviewReminderScope>(EXTRA_REVIEW_REMINDER_SCOPE)
+                } ?: return
             Timber.d("onReceiveBroadcast: reminder: $reviewReminderId, scope: $reviewReminderScope, action: $action")
 
             runGloballyWithTimeout(SEND_REVIEW_REMINDER_TIMEOUT) {
@@ -507,4 +526,33 @@ class NotificationService : AnkiBroadcastReceiver() {
             triggerNotificationFor(context)
         }
     }
+
+    /**
+     * Runs [read], which reads a value from the extras of a received intent. If the extras are corrupt,
+     * logs the failure, re-schedules all review reminders, and returns null.
+     *
+     * #23084: The parceled extras of an alarm scheduled by a previous version of the app can
+     * reference class names which no longer exist or are no longer Parcelable (ex. R8 renamed them).
+     * Re-scheduling all review reminders replaces the corrupted intents.
+     *
+     * @param idForLogging The ID of the review reminder, if already known, to include in the log.
+     */
+    private inline fun <T : Any> rescheduleIfCorrupt(
+        context: Context,
+        idForLogging: ReviewReminderId? = null,
+        read: () -> T?,
+    ): T? =
+        try {
+            read()
+        } catch (e: BadParcelableException) {
+            Timber.w(
+                e,
+                "${reminderLogPrefix(idForLogging)} Failed to get review reminder ID or scope from intent extras, " +
+                    "triggering full re-schedule",
+            )
+            runGloballyWithTimeout(SEND_REVIEW_REMINDER_TIMEOUT) {
+                ReviewReminderAlarmManager.scheduleAllEnabledReviewReminderNotifications(context)
+            }
+            null
+        }
 }

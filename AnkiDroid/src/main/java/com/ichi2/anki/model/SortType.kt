@@ -3,17 +3,18 @@
 package com.ichi2.anki.model
 
 import android.os.Parcelable
-import androidx.annotation.VisibleForTesting
 import anki.search.BrowserColumns.Column
 import com.ichi2.anki.CardBrowser
 import com.ichi2.anki.CollectionManager.withCol
-import com.ichi2.anki.R
 import com.ichi2.anki.browser.BrowserColumnKey
+import com.ichi2.anki.common.utils.ext.browserSortCardsBackwards
+import com.ichi2.anki.common.utils.ext.browserSortCardsColumn
+import com.ichi2.anki.common.utils.ext.browserSortNotesBackwards
+import com.ichi2.anki.common.utils.ext.browserSortNotesColumn
 import com.ichi2.anki.libanki.BrowserConfig
 import com.ichi2.anki.libanki.SortOrder
 import com.ichi2.anki.model.CardsOrNotes.NOTES
 import com.ichi2.anki.settings.Prefs
-import com.ichi2.anki.settings.PrefsRepository
 import kotlinx.parcelize.Parcelize
 import timber.log.Timber
 
@@ -50,13 +51,18 @@ sealed class SortType : Parcelable {
         when (this) {
             is NoOrdering -> Prefs.cardBrowserNoSorting = true
             is CollectionOrdering -> {
-                val isNotesMode = cardsOrNotes == NOTES
-
-                val sortKey = BrowserConfig.sortColumnKey(isNotesMode)
-                val reverseKey = BrowserConfig.sortBackwardsKey(isNotesMode)
-
-                withCol { config.set(sortKey, this@SortType.key.value) }
-                withCol { config.set(reverseKey, this@SortType.reverse) }
+                withCol {
+                    when (cardsOrNotes) {
+                        CardsOrNotes.CARDS -> {
+                            config.browserSortCardsColumn = this@SortType.key.value
+                            config.browserSortCardsBackwards = this@SortType.reverse
+                        }
+                        NOTES -> {
+                            config.browserSortNotesColumn = this@SortType.key.value
+                            config.browserSortNotesBackwards = this@SortType.reverse
+                        }
+                    }
+                }
 
                 Prefs.cardBrowserNoSorting = false
             }
@@ -89,30 +95,12 @@ sealed class SortType : Parcelable {
     }
 }
 
-/**
- * Whether the Card Browser should use an efficient 'no sorting' mode when displaying results
- *
- * **AnkiDroid Only**
- *
- * TODO: This should differentiate cards & notes mode
- */
-@VisibleForTesting
-var PrefsRepository.cardBrowserNoSorting: Boolean
-    get() = getBoolean(R.string.pref_browser_no_sorting, false)
-    set(value) {
-        putBoolean(R.string.pref_browser_no_sorting, value)
+private suspend fun getBrowserColumnKey(cardsOrNotes: CardsOrNotes): String =
+    withCol {
+        if (cardsOrNotes == NOTES) config.browserSortNotesColumn else config.browserSortCardsColumn
     }
 
-private suspend fun getBrowserColumnKey(cardsOrNotes: CardsOrNotes): String {
-    val isNotesMode = cardsOrNotes == NOTES
-    val sortKey = BrowserConfig.sortColumnKey(isNotesMode)
-
-    return withCol { config.get<String>(sortKey) } ?: "noteFld"
-}
-
-private suspend fun getSortBackwards(cardsOrNotes: CardsOrNotes): Boolean {
-    val isNotesMode = cardsOrNotes == NOTES
-    val sortBackwardsKey = BrowserConfig.sortBackwardsKey(isNotesMode)
-
-    return withCol { config.get<Boolean>(sortBackwardsKey) } ?: false
-}
+private suspend fun getSortBackwards(cardsOrNotes: CardsOrNotes): Boolean =
+    withCol {
+        if (cardsOrNotes == NOTES) config.browserSortNotesBackwards else config.browserSortCardsBackwards
+    }

@@ -4,7 +4,6 @@ package com.ichi2.anki.browser.search
 
 import androidx.annotation.CheckResult
 import androidx.annotation.VisibleForTesting
-import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ichi2.anki.CollectionManager.withCol
@@ -14,6 +13,8 @@ import com.ichi2.anki.browser.SearchHistory.SearchHistoryEntry
 import com.ichi2.anki.common.annotations.NeedsTest
 import com.ichi2.anki.libanki.DeckNameId
 import com.ichi2.anki.libanki.NoteTypeNameID
+import com.ichi2.anki.settings.Prefs
+import com.ichi2.anki.utils.ViewModelSavedStateHandle
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -44,26 +45,17 @@ import timber.log.Timber
 // The sub-fragments (StandardSearchFragment etc...) need to be able to modify/close the
 // EditText, but should not be coupled directly to the parent SearchView.
 class CardBrowserSearchViewModel(
-    private val savedStateHandle: SavedStateHandle,
+    private val savedStateHandle: ViewModelSavedStateHandle,
 ) : ViewModel() {
     private val searchHistoryManager = SearchHistory()
 
     val advancedSearchFlow =
-        savedStateHandle.getMutableStateFlow(STATE_ADVANCED_SEARCH_ENABLED, false)
+        savedStateHandle.getMutableStateFlow(STATE_ADVANCED_SEARCH_ENABLED, false).apply {
+            if (!Prefs.devUsingCardBrowserSearchTools) value = false
+        }
 
-    private val advancedSearchTextFlow =
-        savedStateHandle.getMutableStateFlow(STATE_ADVANCED_SEARCH_TEXT, "")
-    private val basicSearchTextFlow =
-        savedStateHandle.getMutableStateFlow(STATE_BASIC_SEARCH_TEXT, "")
-
-    val searchTextFlow =
-        combine(advancedSearchFlow, basicSearchTextFlow, advancedSearchTextFlow) { displayingAdvancedSearch, basicText, advancedText ->
-            if (displayingAdvancedSearch) advancedText else basicText
-        }.stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.Eagerly,
-            initialValue = "",
-        )
+    val searchTextFlow: StateFlow<String>
+        field = savedStateHandle.getMutableStateFlow(STATE_SEARCH_TEXT, "")
 
     val isHistoryExpandedFlow = savedStateHandle.getMutableStateFlow(STATE_HISTORY_EXPANDED, false)
 
@@ -87,7 +79,7 @@ class CardBrowserSearchViewModel(
             it.entryToSearchString.size > MAX_SEARCH_HISTORY_ENTRIES
         }
 
-    val closeSearchViewFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 1, replay = 1)
+    val closeSearchViewFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     val submittedSearchFlow = MutableSharedFlow<SearchRequest?>(extraBufferCapacity = 1, replay = 1)
 
@@ -193,6 +185,8 @@ class CardBrowserSearchViewModel(
      * Toggles between Basic and Advanced search mode
      */
     fun toggleAdvancedSearch() {
+        if (!Prefs.devUsingCardBrowserSearchTools) return
+
         Timber.i("Toggling advanced search to %s", !advancedSearchFlow.value)
         advancedSearchFlow.value = !advancedSearchFlow.value
     }
@@ -202,12 +196,12 @@ class CardBrowserSearchViewModel(
     }
 
     /**
-     * Appends [searchText] to the current temporary advances search text
+     * Appends [searchText] to the current unsubmitted search text
      */
     fun appendAdvancedSearch(searchText: String) {
         Timber.d("appending search text '%s'", searchText)
-        val currentValue = advancedSearchTextFlow.value
-        advancedSearchTextFlow.value +=
+        val currentValue = searchTextFlow.value
+        searchTextFlow.value +=
             buildString {
                 if (currentValue.isNotBlank() && !currentValue.endsWith(" ")) append(' ')
                 append(searchText)
@@ -226,11 +220,7 @@ class CardBrowserSearchViewModel(
         // move from system back to 'user'
         updateFilterState { it.copy() }
 
-        if (advancedSearchFlow.value) {
-            advancedSearchTextFlow.value = sanitizedText
-        } else {
-            basicSearchTextFlow.value = sanitizedText
-        }
+        searchTextFlow.value = sanitizedText
     }
 
     fun submitCurrentSearch(searchToSubmit: SearchRequest) =
@@ -290,6 +280,8 @@ class CardBrowserSearchViewModel(
      */
     fun submitSavedSearch(search: SavedSearch) {
         Timber.i("selected saved search")
+        // TODO: Populate chips from the saved query (requires backend work).
+        updateFilterState { SearchFilters.EMPTY }
         onSearchTextChanged(search.query)
         submitCurrentSearch()
     }
@@ -310,15 +302,10 @@ class CardBrowserSearchViewModel(
         viewModelScope.launch {
             Timber.i("clearing temp search state")
             advancedSearchFlow.value = false
-            basicSearchTextFlow.value = submittedSearch.query
-            advancedSearchTextFlow.value = submittedSearch.query
+            searchTextFlow.value = submittedSearch.query
             filterStateUpdateFlow.value = FilterUpdate.System(submittedSearch.filters)
 
             isScreenOpenFlow.value = false
-
-            savedStateHandle.remove<Any>(STATE_ADVANCED_SEARCH_ENABLED)
-            savedStateHandle.remove<Any>(STATE_BASIC_SEARCH_TEXT)
-            savedStateHandle.remove<Any>(STATE_ADVANCED_SEARCH_TEXT)
         }
 
     fun syncState(search: SearchRequest) =
@@ -373,8 +360,7 @@ class CardBrowserSearchViewModel(
 
     companion object {
         private const val STATE_ADVANCED_SEARCH_ENABLED = "advancedSearch"
-        private const val STATE_BASIC_SEARCH_TEXT = "basicSearchText"
-        private const val STATE_ADVANCED_SEARCH_TEXT = "advancedSearchText"
+        private const val STATE_SEARCH_TEXT = "searchText"
         private const val STATE_HISTORY_EXPANDED = "historyExpanded"
 
         /** Limits the number of history items, so controls appear below without scrolling */

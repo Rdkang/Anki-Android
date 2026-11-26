@@ -43,9 +43,6 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import androidx.appcompat.widget.AppCompatEditText
-import androidx.core.graphics.toColorInt
-import com.google.android.material.color.MaterialColors
-import com.ichi2.anki.R
 import com.ichi2.utils.AndroidUiUtils.setFocusAndOpenKeyboard
 import timber.log.Timber
 
@@ -66,16 +63,6 @@ open class FixedEditText : AppCompatEditText {
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? =
         super.onCreateInputConnection(outAttrs).applyNoSuggest(outAttrs, noSuggest)
-
-    init {
-        val highlightColor =
-            MaterialColors.getColor(
-                context,
-                R.attr.editTextHighlightColor,
-                "#99CCFF".toColorInt(), // light blue color for fallback just-in-case
-            )
-        setHighlightColor(highlightColor)
-    }
 
     override fun setSelection(index: Int) {
         try {

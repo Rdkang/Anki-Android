@@ -27,6 +27,7 @@ import com.ichi2.anki.common.storage.StorageDecision
 import com.ichi2.anki.common.utils.android.Threads
 import com.ichi2.anki.common.utils.android.isRobolectric
 import com.ichi2.anki.common.utils.isRunningAsUnitTest
+import com.ichi2.anki.exception.CollectionLockedException
 import com.ichi2.anki.exception.StorageNotConfiguredException
 import com.ichi2.anki.exception.SystemStorageException
 import com.ichi2.anki.libanki.Collection
@@ -274,6 +275,7 @@ object CollectionManager {
 
     /**
      * Translations provided by the Rust backend/Anki desktop code.
+     * NOTE: in composable code use the [com.ichi2.anki.ui.internationalization.tr] extension.
      */
     val TR: Translations
         get() {
@@ -329,10 +331,23 @@ object CollectionManager {
      * If the collection is open, close it.
      */
     suspend fun ensureClosed() {
+        withClosedCollection {}
+    }
+
+    /**
+     * Closes the cached collection and runs [block] on the collection queue.
+     *
+     * Use when changing the collection path: another queued operation must not reopen the
+     * old collection between closing it and recording the new path.
+     * [block] must not call other methods which enter the collection queue.
+     */
+    suspend fun <T> withClosedCollection(
+        @WorkerThread block: () -> T,
+    ): T =
         withQueue {
             ensureClosedInner()
+            block()
         }
-    }
 
     /** See [ensureClosed]. This must only be run inside the queue. */
     private fun ensureClosedInner() {
@@ -393,15 +408,20 @@ object CollectionManager {
             throw CollectionHelper.systemStorageFailure ?: StorageNotConfiguredException()
         }
         ensureBackendInner()
-        emulatedOpenFailure?.triggerFailure()
-        if (collection == null || collection!!.dbClosed) {
-            val collectionPath = collectionFilesTestOverride ?: collectionPathInValidFolder()
-            collection =
-                collection(
-                    collectionFiles = collectionPath,
-                    databaseBuilder = { backend -> createDatabaseUsingRustBackend(backend) },
-                    backend = backend,
-                )
+        try {
+            emulatedOpenFailure?.triggerFailure()
+            if (collection == null || collection!!.dbClosed) {
+                val collectionPath = collectionFilesTestOverride ?: collectionPathInValidFolder()
+                collection =
+                    collection(
+                        collectionFiles = collectionPath,
+                        databaseBuilder = { backend -> createDatabaseUsingRustBackend(backend) },
+                        backend = backend,
+                    )
+            }
+        } catch (e: BackendException.BackendDbException.BackendDbLockedException) {
+            // All consumers should better explain the issue
+            throw CollectionLockedException(e)
         }
     }
 
@@ -599,7 +619,7 @@ object CollectionManager {
     }
 
     enum class CollectionOpenFailure {
-        /** Raises [BackendException.BackendDbException.BackendDbLockedException] */
+        /** Raises [BackendException.BackendDbException.BackendDbLockedException], surfaced as [CollectionLockedException] */
         LOCKED,
 
         /** Raises [BackendException.BackendFatalError] */

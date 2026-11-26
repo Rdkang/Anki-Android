@@ -3,7 +3,6 @@
 
 package com.ichi2.anki.testutil
 
-import android.annotation.SuppressLint
 import androidx.recyclerview.widget.RecyclerView
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.action.ViewActions.click
@@ -18,6 +17,7 @@ import com.ichi2.anki.R
 import com.ichi2.anki.TestUtils.clickChildViewWithId
 import com.ichi2.anki.tests.checkWithTimeout
 import com.ichi2.anki.testutil.ThreadUtils.sleep
+import com.ichi2.anki.common.android.R as CommonR
 
 /**
  * This file contains utility methods to interact with the DeckPicker.
@@ -45,13 +45,12 @@ fun discardPreliminaryViews() {
  * Create a deck with a unique name (based on the timestamp) return the name.
  * Must be called from a clean deck picker.
  */
-@SuppressLint("DirectSystemCurrentTimeMillisUsage")
 fun createDeckWithUniqueName(): String {
     val testString = System.currentTimeMillis().toString()
     val deckName = "TestDeck$testString"
     onView(withId(R.id.fab_main)).perform(click())
     onView(withId(R.id.add_deck_button)).perform(click())
-    onView(withId(R.id.dialog_text_input)).perform(typeText(deckName))
+    onView(withId(CommonR.id.dialog_text_input)).perform(typeText(deckName))
     onView(withText(CommonString.dialog_ok)).perform(click())
     return deckName
 }

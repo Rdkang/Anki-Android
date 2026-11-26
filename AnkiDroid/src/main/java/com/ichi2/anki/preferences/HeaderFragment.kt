@@ -10,6 +10,7 @@ import androidx.fragment.app.Fragment
 import androidx.preference.Preference
 import com.bytehamster.lib.preferencesearch.SearchConfiguration
 import com.bytehamster.lib.preferencesearch.SearchPreference
+import com.google.android.material.color.DynamicColors
 import com.ichi2.anki.BuildConfig
 import com.ichi2.anki.CollectionManager.TR
 import com.ichi2.anki.CommonString
@@ -198,6 +199,9 @@ class HeaderFragment : SettingsFragment() {
                 if (!activity.resources.getBoolean(R.bool.bottom_navigation_available)) {
                     searchConfiguration.ignorePreference(activity.getString(R.string.dev_bottom_nav_key))
                 }
+                if (!DynamicColors.isDynamicColorAvailable()) {
+                    searchConfiguration.ignorePreference(activity.getString(R.string.dev_material_you_key))
+                }
             }
 
             // From [HeaderFragment.onCreatePreferences]
@@ -240,7 +244,7 @@ class HeaderFragment : SettingsFragment() {
         fun getHeaderKeyForFragment(fragment: Fragment): Int? =
             when (fragment) {
                 is GeneralSettingsFragment -> R.string.pref_general_screen_key
-                is ReviewingSettingsFragment -> R.string.pref_reviewing_screen_key
+                is ReviewingSettingsFragment, is TimeboxSettingsFragment -> R.string.pref_reviewing_screen_key
                 is SyncSettingsFragment, is CustomSyncServerSettingsFragment -> R.string.pref_sync_screen_key
                 is NotificationsSettingsFragment -> R.string.pref_notifications_screen_key
                 is ScheduleRemindersFragment -> R.string.pref_review_reminders_screen_key

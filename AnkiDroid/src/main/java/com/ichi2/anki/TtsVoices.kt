@@ -20,6 +20,9 @@
 
 package com.ichi2.anki
 
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.Voice
 import com.ichi2.anki.common.android.appContext
@@ -28,6 +31,7 @@ import com.ichi2.anki.i18n.normalize
 import com.ichi2.anki.i18n.toAnkiTwoLetterCode
 import com.ichi2.anki.libanki.TemplateManager
 import com.ichi2.anki.libanki.TtsVoice
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -54,8 +58,8 @@ object TtsVoices {
     /** Published before scanning other engines, so legacy TTS need not wait for them. */
     private val engineLocaleData = AtomicReference(CompletableDeferred<EngineLocales>())
 
-    /** An immutable list of voices available for TTS */
-    private lateinit var availableVoices: Set<AndroidTtsVoice>
+    /** Voices in engine-preference order: the default engine first, then the other engines. */
+    private lateinit var availableVoices: List<AndroidTtsVoice>
 
     /** A job which populates both the default-engine languages and all available voices. */
     private var buildLocalesJob: Job? = null
@@ -70,6 +74,16 @@ object TtsVoices {
      */
     var ttsEngine: String? = null
         private set
+
+    /** Returns whether the system has any installed TTS services. */
+    fun hasInstalledEngine(context: Context): Boolean {
+        val engines =
+            context.packageManager.queryIntentServices(
+                Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE),
+                PackageManager.MATCH_DEFAULT_ONLY,
+            )
+        return engines.isNotEmpty()
+    }
 
     suspend fun refresh() {
         launchBuildLocalesJob()
@@ -104,9 +118,10 @@ object TtsVoices {
     }
 
     /**
-     * Returns the list of available voices for use in TTS
+     * Returns distinct voices from the default engine first, then other engines in discovery order.
+     * Voice order within each engine is preserved. Playback uses this order for language fallback.
      */
-    suspend fun allTtsVoices(): Set<AndroidTtsVoice> {
+    suspend fun allTtsVoices(): List<AndroidTtsVoice> {
         if (this::availableVoices.isInitialized) {
             return this.availableVoices
         }
@@ -149,7 +164,7 @@ object TtsVoices {
     internal suspend fun loadVoices(
         defaultLocales: CompletableDeferred<EngineLocales>,
         createTts: suspend (String?) -> TextToSpeech?,
-    ): Set<AndroidTtsVoice> {
+    ): List<AndroidTtsVoice> {
         // A default-engine instance is needed first to enumerate the installed engines
         val probeTts =
             try {
@@ -162,16 +177,16 @@ object TtsVoices {
         if (probeTts == null) {
             Timber.e("Unable to build list of TTS Voices")
             defaultLocales.complete(EngineLocales(null, emptyList()))
-            return emptySet()
+            return emptyList()
         }
 
         val enginePackages =
             try {
                 val engine = probeTts.defaultEngine
                 defaultLocales.complete(EngineLocales(engine, readLocales(probeTts)))
-                // `engines` lists every installed engine; include the default defensively
+                // Put the default first, preserving discovery order for the remaining engines.
                 try {
-                    (probeTts.engines.map { it.name } + listOfNotNull(engine)).distinct()
+                    (listOfNotNull(engine) + probeTts.engines.map { it.name }).distinct()
                 } catch (e: Exception) {
                     Timber.w(e, "unable to list TTS engines")
                     listOfNotNull(engine)
@@ -208,15 +223,16 @@ object TtsVoices {
      *
      * Each engine is initialised independently so a single misbehaving engine cannot prevent the
      * others from being listed.
+     * Voices are distinct by engine and voice name, keeping the first occurrence.
      *
      * @param createTts builds a [TextToSpeech] bound to the provided engine package, or `null` on failure
-     * @return the union of all voices across [enginePackages]
+     * @return all voices in [enginePackages] order, preserving each engine's voice order
      */
     internal suspend fun loadVoicesFromEngines(
         enginePackages: List<String>,
         createTts: suspend (engine: String) -> TextToSpeech?,
-    ): Set<AndroidTtsVoice> {
-        val voices = mutableSetOf<AndroidTtsVoice>()
+    ): List<AndroidTtsVoice> {
+        val voices = mutableListOf<AndroidTtsVoice>()
         for (engine in enginePackages) {
             val tts = createTts(engine)
             if (tts == null) {
@@ -233,7 +249,7 @@ object TtsVoices {
                 tts.shutdown()
             }
         }
-        return voices
+        return voices.distinctBy { it.engine to it.voice.name }
     }
 
     /**
@@ -242,16 +258,12 @@ object TtsVoices {
      * @param engine the package name of the TTS engine to use, or `null` to use the user's
      * default engine
      * @return a usable [TextToSpeech] instance, or `null` if the [TextToSpeech.OnInitListener]
-     * returns [TextToSpeech.ERROR]
+     * returns [TextToSpeech.ERROR] or construction fails
+     * @throws CancellationException if creation is cancelled
      */
     suspend fun createTts(engine: String? = null) =
         suspendCancellableCoroutine { continuation ->
             var textToSpeech: TextToSpeech? = null
-            continuation.invokeOnCancellation {
-                Timber.v("TTS creation cancelled")
-                textToSpeech?.stop()
-                textToSpeech?.shutdown()
-            }
             Timber.v("begin TTS creation (engine: %s)", engine)
             val onInit =
                 TextToSpeech.OnInitListener { status ->
@@ -272,11 +284,29 @@ object TtsVoices {
             // may be expected to disappear, as it would cause a memory leak. Hence
             // we pass it the application as context.
             textToSpeech =
-                if (engine == null) {
-                    TextToSpeech(appContext, onInit)
-                } else {
-                    TextToSpeech(appContext, onInit, engine)
+                try {
+                    if (engine == null) {
+                        TextToSpeech(appContext, onInit)
+                    } else {
+                        TextToSpeech(appContext, onInit, engine)
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Timber.w(e, "Unable to initialize TTS engine: %s", engine)
+                    continuation.resume(null)
+                    null
                 }
+            // Register after construction so cancellation cannot miss the new instance.
+            continuation.invokeOnCancellation {
+                Timber.v("TTS creation cancelled")
+                // Engine calls can block.
+                // Launch on a scope which survives cancellation of the activity.
+                applicationScope.launch(ioDispatcher) {
+                    textToSpeech?.stop()
+                    textToSpeech?.shutdown()
+                }
+            }
         }
 }
 

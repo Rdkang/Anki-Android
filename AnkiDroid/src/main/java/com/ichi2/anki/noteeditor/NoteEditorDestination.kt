@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Parcelable
 import com.ichi2.anki.AnkiActivity
+import com.ichi2.anki.IntentHandler2
 import com.ichi2.anki.NoteEditorActivity
 import com.ichi2.anki.NoteEditorFragment
 import com.ichi2.anki.NoteEditorFragment.Companion.NoteEditorCaller
@@ -20,6 +21,8 @@ fun NoteEditorDestination.toIntent(context: Context): Intent =
                 putExtra(NoteEditorFragment.EXTRA_CALLER, NoteEditorCaller.DECKPICKER.value)
                 deckId?.let { putExtra(NoteEditorFragment.EXTRA_DID, it) }
             }
+        NoteEditorDestination.AddNoteWithSplash ->
+            Intent(context, IntentHandler2::class.java).putExtras(NoteEditorFragment.addNoteArgs())
         is NoteEditorDestination.ImageOcclusion ->
             Intent(context, NoteEditorActivity::class.java).also { intent ->
                 intent.putExtra(NoteEditorFragment.EXTRA_CALLER, NoteEditorCaller.IMG_OCCLUSION.value)
@@ -44,7 +47,7 @@ fun NoteEditorDestination.toIntent(context: Context): Intent =
             Intent(context, NoteEditorActivity::class.java).also { intent ->
                 intent.putExtra(NoteEditorFragment.EXTRA_CALLER, NoteEditorCaller.CARDBROWSER_ADD.value)
                 intent.putExtra(NoteEditorFragment.EXTRA_TEXT_FROM_SEARCH_VIEW, searchTerms)
-                intent.putExtra(NoteEditorFragment.IN_CARD_BROWSER_ACTIVITY, false)
+                intent.putExtra(NoteEditorFragment.EXTRA_IN_CARD_BROWSER_ACTIVITY, false)
                 deckId?.takeIf { it > 0 }?.let { intent.putExtra(NoteEditorFragment.EXTRA_DID, it) }
             }
         is NoteEditorDestination.EditSelection ->
@@ -55,7 +58,7 @@ fun NoteEditorDestination.toIntent(context: Context): Intent =
                 // To handle multi select and note edit
                 intent.putExtra(NoteEditorFragment.EXTRA_CARD_IDS, cardIds.toLongArray())
                 intent.putExtra(AnkiActivity.EXTRA_FINISH_ANIMATION, animation as Parcelable)
-                intent.putExtra(NoteEditorFragment.IN_CARD_BROWSER_ACTIVITY, inCardBrowserActivity)
+                intent.putExtra(NoteEditorFragment.EXTRA_IN_CARD_BROWSER_ACTIVITY, inCardBrowserActivity)
             }
         is NoteEditorDestination.CopyNote ->
             Intent(context, NoteEditorActivity::class.java).also { intent ->
@@ -63,6 +66,7 @@ fun NoteEditorDestination.toIntent(context: Context): Intent =
                 intent.putExtra(NoteEditorFragment.EXTRA_DID, deckId)
                 intent.putExtra(NoteEditorFragment.EXTRA_CONTENTS, fieldsText)
                 intent.putExtra(NoteEditorFragment.EXTRA_TAGS, tags.toTypedArray())
+                intent.putExtra(NoteEditorFragment.EXTRA_NOTE_TYPE_ID, noteTypeId)
             }
         is NoteEditorDestination.PassArguments ->
             Intent(context, NoteEditorActivity::class.java).also { intent ->

@@ -27,17 +27,31 @@ on:
 
 permissions: {}
 
+env:
+  JAVA_TOOL_OPTIONS: -Dkotlin.daemon.options=autoshutdownIdleSeconds=10
+
 jobs:
   compare-screenshot-test:
     name: compare
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
 
     permissions:
       contents: read # for clone
       actions: write # for upload-artifact
 
     steps:
+      # Work around Ubuntu 26.04's RAM-backed /tmp until the image fix rolls out.
+      # https://github.com/actions/runner-images/pull/14814
+      - name: Keep /tmp on disk
+        if: runner.os == 'Linux'
+        run: |
+          if [ "$(findmnt -n -o FSTYPE --target /tmp)" = "tmpfs" ]; then
+            sudo systemctl mask tmp.mount
+            sudo umount -l /tmp
+          fi
+          df -hT /tmp
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -57,26 +71,33 @@ jobs:
           gradle-version: wrapper
 
       - name: Warm Gradle Cache
-        # This makes sure we fetch gradle network resources with a retry
+        # Keep compilation here: robolectricSdkDownload only downloads SDK jars.
+        # Compiling resolves test dependencies within the retry (Issue 21682).
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
           timeout_minutes: 10
           retry_wait_seconds: 60
           max_attempts: 3
-          command: ./gradlew robolectricSdkDownload :AnkiDroid:compilePlayDebugUnitTestKotlin -Pscreenshot --daemon
+          command: ./gradlew robolectricSdkDownload compileScreenshotTests -Pscreenshot --daemon
+
+      - name: Wait for matching base screenshots
+        id: baseline
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const waitForBaseline = require('./.github/wait_for_screenshot_baseline.js');
+            return await waitForBaseline({ github, context, core });
 
       - name: Download base branch screenshots
         uses: dawidd6/action-download-artifact@eab87c9830c39eff17e5a6eadb20bfb4bc880477 # v27
-        continue-on-error: true
         with:
           name: screenshot
-          workflow: screenshot_store.yml
-          branch: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          run_id: ${{ steps.baseline.outputs.result }}
 
       - name: Compare screenshots
         id: compare-screenshot-test
         run: |
-          ./gradlew compareRoborazziPlayDebug -Pscreenshot --stacktrace
+          ./gradlew compareScreenshots -Pscreenshot -Ptheme=light,dark --stacktrace
 
       - name: Stage screenshot diffs
         if: ${{ always() }}
@@ -84,14 +105,19 @@ jobs:
           # Folder name inside the artifact (e.g. "screenshot-diff-pr-12345" on PRs, "screenshot-diff-main" on push)
           SUBDIR: ${{ github.event_name == 'pull_request' && format('screenshot-diff-pr-{0}', github.event.number) || format('screenshot-diff-{0}', github.ref_name) }}
         run: |
-          # Trim 'AnkiDroid/build/outputs/roborazzi' from the artifact
-          # Only keep diagnostic content for failing cases: each <class>/diffs/ becomes <class>/
+          # Preserve module paths so identically named tests cannot overwrite one another.
           mkdir -p "screenshot-diff/$SUBDIR"
-          shopt -s nullglob
-          for diffs_dir in AnkiDroid/build/outputs/roborazzi/*/diffs; do
-            class_name="$(basename "$(dirname "$diffs_dir")")"
-            mv "$diffs_dir" "screenshot-diff/$SUBDIR/$class_name"
-          done
+          while IFS= read -r -d '' compare; do
+            module="${compare%%/build/reports/screenshot-diffs/*}"
+            relative="${compare#*/build/reports/screenshot-diffs/}"
+            # Flatten local /diffs/ directory: keeps baselines apart from
+            # diffs while testing, and means nothing inside artifact
+            class="${relative%%/*}"
+            name="${relative##*/}"
+            destination="screenshot-diff/$SUBDIR/${module#./}/$class/$name"
+            mkdir -p "$(dirname "$destination")"
+            cp "$compare" "$destination"
+          done < <(find . -type f -path '*/build/reports/screenshot-diffs/*_compare.png' -print0)
 
       - name: Upload screenshot diffs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

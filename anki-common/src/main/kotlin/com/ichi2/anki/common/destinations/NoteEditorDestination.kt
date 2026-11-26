@@ -8,6 +8,7 @@ import android.os.Bundle
 import com.ichi2.anki.common.ui.TransitionDirection
 import com.ichi2.anki.libanki.CardId
 import com.ichi2.anki.libanki.DeckId
+import com.ichi2.anki.libanki.NoteTypeId
 
 /** Opens the Add Note/Note Editor screen. */
 sealed class NoteEditorDestination : Destination() {
@@ -18,6 +19,9 @@ sealed class NoteEditorDestination : Destination() {
     data class AddNote(
         val deckId: DeckId? = null,
     ) : NoteEditorDestination()
+
+    /** Opens the Note Editor through the splash screen. */
+    data object AddNoteWithSplash : NoteEditorDestination()
 
     /**
      * Opens the Note Editor for image occlusion editing.
@@ -87,6 +91,7 @@ sealed class NoteEditorDestination : Destination() {
     data class CopyNote(
         val deckId: DeckId,
         val fieldsText: String,
+        val noteTypeId: NoteTypeId,
         val tags: List<String> = listOf(),
     ) : NoteEditorDestination()
 

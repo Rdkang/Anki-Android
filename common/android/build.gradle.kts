@@ -4,11 +4,14 @@ import com.android.build.api.dsl.LibraryExtension
 
 plugins {
     id("ankidroid.android.library")
+    id("ankidroid.android.compose")
     id("org.jetbrains.kotlin.plugin.parcelize")
 }
 
 configure<LibraryExtension> {
     namespace = "com.ichi2.anki.common.android"
+    buildFeatures.buildConfig = true
+    buildFeatures.viewBinding = true
     testFixtures.enable = true
 }
 
@@ -17,7 +20,7 @@ dependencies {
 
     implementation(libs.androidx.annotation)
     implementation(libs.androidx.appcompat)
-    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core)
     implementation(libs.androidx.fragment.ktx)
     implementation(libs.androidx.preference.ktx)
     implementation(libs.google.material)
@@ -30,6 +33,8 @@ dependencies {
     testImplementation(libs.junit.vintage.engine)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.junit)
+
+    testFixturesApi(libs.androidx.espresso.core)
 
     testFixturesImplementation(libs.androidx.appcompat)
     testFixturesImplementation(libs.androidx.test.core)

@@ -1,18 +1,5 @@
-/*
- * Copyright (c) 2022 Ankitects Pty Ltd <https://apps.ankiweb.net>                    *
- *
- * This program is free software; you can redistribute it and/or modify it under
- * the terms of the GNU General Public License as published by the Free Software
- * Foundation; either version 3 of the License, or (at your option) any later
- * version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT ANY
- * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
- * PARTICULAR PURPOSE. See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-FileCopyrightText: Copyright (c) 2022 Ankitects Pty Ltd <https://apps.ankiweb.net>                    *
 
 package com.ichi2.anki.libanki
 
@@ -29,6 +16,14 @@ data class UndoStatus(
     // not currently used
     val lastStep: UndoStepCounter,
 ) {
+    @NotInPyLib
+    val undoAvailable: Boolean
+        get() = undo != null
+
+    @NotInPyLib
+    val redoAvailable: Boolean
+        get() = redo != null
+
     companion object {
         fun from(proto: UndoStatusProto): UndoStatus =
             UndoStatus(
@@ -48,10 +43,7 @@ fun Collection.undoLabel(): String? {
 }
 
 @NotInPyLib
-fun Collection.undoAvailable(): Boolean {
-    val status = undoStatus()
-    return status.undo != null
-}
+fun Collection.undoAvailable(): Boolean = undoStatus().undoAvailable
 
 @NotInPyLib
 fun Collection.redoLabel(): String? {
@@ -60,4 +52,4 @@ fun Collection.redoLabel(): String? {
 }
 
 @NotInPyLib
-fun Collection.redoAvailable(): Boolean = undoStatus().redo != null
+fun Collection.redoAvailable(): Boolean = undoStatus().redoAvailable

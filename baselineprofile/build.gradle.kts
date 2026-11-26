@@ -1,4 +1,5 @@
 import com.android.build.api.dsl.TestExtension
+import com.ichi2.anki.gradle.configureAndroidLint
 
 plugins {
     // Use `id` to avoid classpath conflicts. Version pinned by buildSrc/.
@@ -41,7 +42,7 @@ configure<TestExtension> {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // AnkiDroid defines three product flavors (play, amazon, full) in the
+        // AnkiDroid defines two product flavors (play, full) in the
         // `appStore` dimension. Rather than duplicate them here we target the
         // `play` flavor via `missingDimensionStrategy`, which keeps this module
         // flavor-free but still able to resolve `:AnkiDroid` variants.
@@ -66,7 +67,7 @@ baselineProfile {
     useConnectedDevices = true
 }
 
-apply(from = "../lint.gradle")
+configureAndroidLint()
 
 dependencies {
     implementation(libs.androidx.test.junit)

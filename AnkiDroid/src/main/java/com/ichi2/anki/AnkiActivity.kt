@@ -48,13 +48,17 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.DEFAULT_ARGS_KEY
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.CreationExtras
+import androidx.lifecycle.viewmodel.MutableCreationExtras
 import androidx.viewbinding.ViewBinding
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.snackbar.Snackbar
-import com.ichi2.anim.ActivityTransitionAnimation
+import com.ichi2.anim.enableActivityAnimation
+import com.ichi2.anim.enableIntentAnimation
 import com.ichi2.anki.android.input.ShortcutGroup
 import com.ichi2.anki.android.input.ShortcutGroupProvider
 import com.ichi2.anki.android.input.shortcut
@@ -69,28 +73,29 @@ import com.ichi2.anki.common.crashreporting.CrashReportService
 import com.ichi2.anki.common.preferences.sharedPrefs
 import com.ichi2.anki.common.ui.TransitionDirection
 import com.ichi2.anki.common.ui.TransitionDirection.DEFAULT
-import com.ichi2.anki.common.ui.TransitionDirection.NONE
 import com.ichi2.anki.common.utils.android.getColorFromAttr
 import com.ichi2.anki.common.utils.android.showThemedToast
-import com.ichi2.anki.common.utils.annotation.KotlinCleanup
 import com.ichi2.anki.compat.CompatHelper
 import com.ichi2.anki.compat.CompatHelper.Companion.registerReceiverCompat
 import com.ichi2.anki.dialogs.AsyncDialogFragment
+import com.ichi2.anki.dialogs.BackupPromptDialog
 import com.ichi2.anki.dialogs.DatabaseErrorDialog
 import com.ichi2.anki.dialogs.DatabaseErrorDialog.CustomExceptionData
 import com.ichi2.anki.dialogs.DatabaseErrorDialog.DatabaseErrorDialogType
 import com.ichi2.anki.dialogs.DialogHandler
-import com.ichi2.anki.dialogs.ExportReadyDialog.Companion.ARG_SHARE_AS_TEXT
-import com.ichi2.anki.dialogs.ExportReadyDialog.Companion.KEY_EXPORT_PATH
 import com.ichi2.anki.dialogs.ExportReadyDialog.Companion.REQUEST_EXPORT_SAVE
 import com.ichi2.anki.dialogs.ExportReadyDialog.Companion.REQUEST_EXPORT_SHARE
+import com.ichi2.anki.dialogs.ExportReadyDialog.Companion.RESULT_EXPORT_PATH
+import com.ichi2.anki.dialogs.ExportReadyDialog.Companion.RESULT_SHARE_AS_TEXT
 import com.ichi2.anki.dialogs.SimpleMessageDialog
 import com.ichi2.anki.dialogs.handleExportReadyRequest
 import com.ichi2.anki.dialogs.viewmodel.ExportReadyViewModel
 import com.ichi2.anki.libanki.Collection
+import com.ichi2.anki.receiver.ExportSharedReceiver
 import com.ichi2.anki.receiver.SdCardReceiver
 import com.ichi2.anki.settings.Prefs
 import com.ichi2.anki.snackbar.showSnackbar
+import com.ichi2.anki.utils.ViewModelSavedStateHandle
 import com.ichi2.anki.utils.ext.requireString
 import com.ichi2.anki.utils.ext.showDialogFragment
 import com.ichi2.anki.workarounds.AppLoadedFromBackupWorkaround.showedActivityFailedScreen
@@ -118,6 +123,17 @@ open class AnkiActivity(
     val exportReadyViewModel by viewModels<ExportReadyViewModel> { ExportReadyViewModel.factory }
 
     /**
+     * Supplies [ViewModelSavedStateHandle] without copying intent extras into every handle.
+     * Launch inputs belong in ViewModel constructor parameters.
+     * This also applies to fragments using activityViewModels(), but not fragment-scoped ViewModels.
+     */
+    override val defaultViewModelCreationExtras: CreationExtras
+        get() =
+            MutableCreationExtras(super.defaultViewModelCreationExtras).apply {
+                this[DEFAULT_ARGS_KEY] = Bundle.EMPTY
+            }
+
+    /**
      * Receiver that informs us when a broadcast listen in [broadcastsActions] is received.
      *
      * @see registerReceiver
@@ -130,7 +146,7 @@ open class AnkiActivity(
     val dialogHandler = DialogHandler(this)
     override val ankiActivity = this
 
-    private val customTabActivityHelper: CustomTabActivityHelper = CustomTabActivityHelper()
+    private val customTabActivityHelper: CustomTabActivityHelper = CustomTabActivityHelper(lifecycleScope)
 
     private lateinit var fileExportPath: String
     private val saveFileLauncher: ActivityResultLauncher<Intent> =
@@ -142,6 +158,12 @@ open class AnkiActivity(
             }
         }
 
+    override fun attachBaseContext(newBase: Context) {
+        val base = AnkiDroidApp.wrapForActiveProfile(newBase)
+        Themes.updateCurrentTheme(base)
+        super.attachBaseContext(base)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // The hardware buttons should control the music volume
         volumeControlStream = AudioManager.STREAM_MUSIC
@@ -151,17 +173,17 @@ open class AnkiActivity(
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             @Suppress("deprecation")
-            window.navigationBarColor = getColor(R.color.transparent)
+            window.navigationBarColor = getColor(CommonR.color.transparent)
         }
         supportFragmentManager.setFragmentResultListener(REQUEST_EXPORT_SAVE, this) { _, bundle ->
             saveExportFile(
-                bundle.getString(KEY_EXPORT_PATH) ?: error("Missing required exportPath!"),
+                bundle.getString(RESULT_EXPORT_PATH) ?: error("Missing required exportPath!"),
             )
         }
         supportFragmentManager.setFragmentResultListener(REQUEST_EXPORT_SHARE, this) { _, bundle ->
             shareFile(
-                path = bundle.requireString(KEY_EXPORT_PATH),
-                asText = bundle.getBoolean(ARG_SHARE_AS_TEXT, false),
+                path = bundle.requireString(RESULT_EXPORT_PATH),
+                asText = bundle.getBoolean(RESULT_SHARE_AS_TEXT, false),
             )
         }
 
@@ -172,7 +194,7 @@ open class AnkiActivity(
         }
 
         if (savedInstanceState != null) {
-            val restoredValue = savedInstanceState.getString(KEY_EXPORT_FILE_NAME) ?: return
+            val restoredValue = savedInstanceState.getString(STATE_EXPORT_FILE_PATH) ?: return
             fileExportPath = restoredValue
         }
     }
@@ -218,31 +240,6 @@ open class AnkiActivity(
         setContentView(binding.root)
     }
 
-    /**
-     * Sets the title (and possibly subtitle) of the toolbar (support action bar) for the activity.
-     *
-     * @param title The new title to be set for the toolbar.
-     * @param subtitle The new subtitle to be set for the toolbar. If `null`, the subtitle is removed.
-     */
-    open fun setToolbarText(
-        title: String,
-        subtitle: String? = null,
-    ) {
-        supportActionBar?.title = title
-        supportActionBar?.subtitle = subtitle
-    }
-
-    /**
-     * Sets the title (and possibly subtitle) of the toolbar (support action bar) for the activity.
-     *
-     * @param titleRes The new title to be set for the toolbar.
-     * @param subtitleRes The new subtitle to be set for the toolbar. If `null`, the subtitle is removed.
-     */
-    open fun setToolbarText(
-        @StringRes titleRes: Int,
-        @StringRes subtitleRes: Int? = null,
-    ) = setToolbarText(getString(titleRes), subtitleRes?.let { getString(it) })
-
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         if (item.itemId == android.R.id.home) {
             Timber.i("Home button pressed")
@@ -264,12 +261,12 @@ open class AnkiActivity(
 
     /**
      * Maps from intent name action to function to run when this action is received by [broadcastReceiver].
-     * By default it handles [SdCardReceiver.MEDIA_EJECT], and shows/dismisses dialogs when an SD
+     * By default it handles [SdCardReceiver.ACTION_MEDIA_EJECT], and shows/dismisses dialogs when an SD
      * card is ejected/remounted (collection is saved beforehand by [SdCardReceiver])
      */
     protected open val broadcastsActions =
         mapOf(
-            SdCardReceiver.MEDIA_EJECT to { onSdCardNotMounted() },
+            SdCardReceiver.ACTION_MEDIA_EJECT to { onSdCardNotMounted() },
         )
 
     /**
@@ -358,40 +355,6 @@ open class AnkiActivity(
         enableActivityAnimation(animation, open = false)
     }
 
-    private fun disableIntentAnimation(intent: Intent) {
-        intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
-    }
-
-    /**
-     * @param open when `true`, overrides the animation for entering this activity.
-     * When `false`, overrides the animation for closing this activity
-     */
-    private fun disableActivityAnimation(open: Boolean) {
-        ActivityTransitionAnimation.slide(this, NONE, open)
-    }
-
-    @KotlinCleanup("Maybe rename this? This only disables the animation conditionally")
-    private fun enableIntentAnimation(intent: Intent) {
-        if (animationDisabled()) {
-            disableIntentAnimation(intent)
-        }
-    }
-
-    /**
-     * @param open when `true`, overrides the animation for entering this activity.
-     * When `false`, overrides the animation for closing this activity
-     */
-    private fun enableActivityAnimation(
-        animation: TransitionDirection,
-        open: Boolean,
-    ) {
-        if (animationDisabled()) {
-            disableActivityAnimation(open)
-        } else {
-            ActivityTransitionAnimation.slide(this, animation, open)
-        }
-    }
-
     /** Method for loading the collection which is inherited by every [AnkiActivity]  */
     fun startLoadingCollection() {
         Timber.d("AnkiActivity.startLoadingCollection()")
@@ -451,15 +414,14 @@ open class AnkiActivity(
         }
     }
 
+    /**
+     * Preloads a URL for future loading.
+     *
+     * @see CustomTabActivityHelper.mayLaunchUrl
+     */
     internal fun mayOpenUrl(
         @StringRes url: Int,
-    ) {
-        val url = getString(url)
-        val success = customTabActivityHelper.mayLaunchUrl(url.toUri(), null, null)
-        if (!success) {
-            Timber.w("Couldn't preload url: %s", url)
-        }
-    }
+    ) = customTabActivityHelper.mayLaunchUrl(getString(url))
 
     /**
      * Opens a URL in a custom tab, with fallback to a browser if no custom tab implementation is available.
@@ -475,13 +437,12 @@ open class AnkiActivity(
             showSnackbar(getString(CommonString.no_browser_msg, url.toString()))
             return
         }
-        val toolbarColor = MaterialColors.getColor(this, CommonR.attr.appBarColor, 0)
-        val navBarColor = MaterialColors.getColor(this, CommonR.attr.customTabNavBarColor, 0)
+        val appBarColor = MaterialColors.getColor(this, CommonR.attr.appBarColor, 0)
         val colorSchemeParams =
             CustomTabColorSchemeParams
                 .Builder()
-                .setToolbarColor(toolbarColor)
-                .setNavigationBarColor(navBarColor)
+                .setToolbarColor(appBarColor)
+                .setNavigationBarColor(appBarColor)
                 .build()
         val builder =
             CustomTabsIntentBuilder(customTabActivityHelper.session)
@@ -631,6 +592,7 @@ open class AnkiActivity(
     }
 
     // Show dialogs to deal with database loading issues etc
+    // TODO: Make this generic over a regular activity, so it can be pulled down to anki-common
     open fun showDatabaseErrorDialog(
         errorDialogType: DatabaseErrorDialogType,
         exceptionData: CustomExceptionData? = null,
@@ -656,7 +618,10 @@ open class AnkiActivity(
     protected fun showedActivityFailedScreen(savedInstanceState: Bundle?) =
         showedActivityFailedScreen(
             savedInstanceState = savedInstanceState,
-            activitySuperOnCreate = { state -> super.onCreate(state) },
+            activitySuperOnCreate = { state ->
+                Themes.setTheme(this, state)
+                super.onCreate(state)
+            },
         )
 
     /** @see Window.setNavigationBarColor */
@@ -704,7 +669,7 @@ open class AnkiActivity(
 
     override fun onSaveInstanceState(outState: Bundle) {
         if (::fileExportPath.isInitialized) {
-            outState.putString(KEY_EXPORT_FILE_NAME, fileExportPath)
+            outState.putString(STATE_EXPORT_FILE_PATH, fileExportPath)
         }
         super.onSaveInstanceState(outState)
     }
@@ -755,6 +720,7 @@ open class AnkiActivity(
             Intent.createChooser(
                 sendIntent,
                 getString(CommonString.export_share_title),
+                ExportSharedReceiver.getIntentSender(this, attachment),
             )
         if (shareFileIntent.resolveActivity(packageManager) != null) {
             startActivity(shareFileIntent)
@@ -803,6 +769,7 @@ open class AnkiActivity(
                     }
 
                 if (isSuccessful) {
+                    BackupPromptDialog.onFileExported(this@AnkiActivity, File(fileExportPath))
                     showSnackbar(CommonString.export_save_apkg_successful, Snackbar.LENGTH_SHORT)
                 } else {
                     showSnackbar(CommonString.export_save_apkg_unsuccessful)
@@ -850,7 +817,7 @@ open class AnkiActivity(
         const val EXTRA_FINISH_ANIMATION = "finishAnimation"
 
         private const val SIMPLE_NOTIFICATION_ID = 0
-        private const val KEY_EXPORT_FILE_NAME = "key_export_file_name"
+        private const val STATE_EXPORT_FILE_PATH = "key_export_file_name"
     }
 }
 

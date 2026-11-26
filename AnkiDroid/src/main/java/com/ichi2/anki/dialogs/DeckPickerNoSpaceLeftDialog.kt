@@ -1,23 +1,12 @@
-/*
- * Copyright (c) 2015 Timothy Rae <perceptualchaos2@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it under
- * the terms of the GNU General Public License as published by the Free Software
- * Foundation; either version 3 of the License, or (at your option) any later
- * version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT ANY
- * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
- * PARTICULAR PURPOSE. See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-FileCopyrightText: Copyright (c) 2015 Timothy Rae <perceptualchaos2@gmail.com>
 
 package com.ichi2.anki.dialogs
 
 import android.os.Bundle
+import androidx.annotation.MainThread
 import androidx.appcompat.app.AlertDialog
+import androidx.fragment.app.FragmentActivity
 import com.ichi2.anki.CommonString
 import com.ichi2.anki.analytics.AnalyticsDialogFragment
 import com.ichi2.utils.cancelable
@@ -37,6 +26,13 @@ class DeckPickerNoSpaceLeftDialog : AnalyticsDialogFragment() {
         }
 
     companion object {
-        fun newInstance(): DeckPickerNoSpaceLeftDialog = DeckPickerNoSpaceLeftDialog()
+        private const val TAG = "DeckPickerNoSpaceLeftDialog"
+
+        @MainThread
+        fun show(activity: FragmentActivity) {
+            val manager = activity.supportFragmentManager
+            if (manager.findFragmentByTag(TAG) != null) return
+            DeckPickerNoSpaceLeftDialog().showNow(manager, TAG)
+        }
     }
 }
