@@ -20,7 +20,6 @@ import android.view.SubMenu
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
-import android.widget.Button
 import android.widget.ImageButton
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
@@ -50,7 +49,6 @@ import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePadding
 import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
-import androidx.fragment.app.FragmentTransaction
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.commit
 import androidx.fragment.app.viewModels
@@ -94,7 +92,6 @@ import com.ichi2.anki.browser.CardBrowserViewModel.ToggleSelectionState.SELECT_N
 import com.ichi2.anki.browser.RepositionCardFragment.Companion.REQUEST_REPOSITION_NEW_CARDS
 import com.ichi2.anki.browser.RepositionCardsRequest.NoRepositionableCardsError
 import com.ichi2.anki.browser.RepositionCardsRequest.RepositionData
-import com.ichi2.anki.browser.search.AdvancedSearchFragment
 import com.ichi2.anki.browser.search.CardBrowserSearchViewModel
 import com.ichi2.anki.browser.search.CardBrowserSearchViewModel.UserMessage
 import com.ichi2.anki.browser.search.CardStateBottomSheetFragment
@@ -156,6 +153,7 @@ import com.ichi2.anki.utils.ext.collectInLifecycle
 import com.ichi2.anki.utils.ext.doOnScrolled
 import com.ichi2.anki.utils.ext.getParcelableCompat
 import com.ichi2.anki.utils.ext.hasCheckedBackground
+import com.ichi2.anki.utils.ext.removeFragmentByTag
 import com.ichi2.anki.utils.ext.setFragmentResultListener
 import com.ichi2.anki.utils.ext.showDialogFragment
 import com.ichi2.anki.utils.ext.updateNestedScrolling
@@ -291,8 +289,6 @@ class CardBrowserFragment :
     private var legacyDeckName: TextView? = null
     private var legacySubtitle: TextView? = null
     // endregion
-
-    private var toggleAdvancedSearch: Button? = null
 
     // region Fragment-owned menu hosts
     override val menuInflater: MenuInflater? get() = activity?.menuInflater
@@ -461,13 +457,9 @@ class CardBrowserFragment :
                 }
             }
 
-        fun FragmentTransaction.removeByTag(tag: String): FragmentTransaction {
-            val fragment = childFragmentManager.findFragmentByTag(tag) ?: return this
-            return remove(fragment)
-        }
-
         searchView =
             view.findViewById<SearchView>(R.id.search_view)?.apply {
+                getOrCreateSearchFragment(StandardSearchFragment.TAG, ::StandardSearchFragment)
                 editText.doAfterTextChanged { searchViewModel.onSearchTextChanged(it.toString()) }
                 addTransitionListener { _, _, state ->
                     if (state == SearchView.TransitionState.SHOWING) {
@@ -483,11 +475,7 @@ class CardBrowserFragment :
 
                     if (state != SearchView.TransitionState.HIDDEN) return@addTransitionListener
                     // clear state on hide
-                    childFragmentManager
-                        .commit {
-                            removeByTag(StandardSearchFragment.TAG)
-                            removeByTag(AdvancedSearchFragment.TAG)
-                        }
+                    childFragmentManager.removeFragmentByTag(StandardSearchFragment.TAG)
 
                     // Exiting out the SearchView should reset the state
                     // The ViewModel remains active as it's tied to the host fragment.
@@ -495,20 +483,15 @@ class CardBrowserFragment :
                 }
                 editText.setOnEditorActionListener { _, actionId, event ->
                     if (actionId == EditorInfo.IME_ACTION_SEARCH || event?.keyCode == KeyEvent.KEYCODE_ENTER) {
-                        searchViewModel.submitCurrentSearch()
+                        if (searchViewModel.isScreenOpenFlow.value) {
+                            searchViewModel.submitCurrentSearch()
+                        }
                         true
                     } else {
                         false
                     }
                 }
             }
-        toggleAdvancedSearch =
-            view.findViewById<Button>(R.id.toggle_advanced_search)?.apply {
-                setOnClickListener {
-                    searchViewModel.toggleAdvancedSearch()
-                }
-            }
-
         if (activity !is CardBrowser) {
             embeddedMultiSelectOnBackPressedCallback.isEnabled = activityViewModel.isInMultiSelectMode
             requireActivity().onBackPressedDispatcher.addCallback(viewLifecycleOwner, embeddedMultiSelectOnBackPressedCallback)
@@ -1189,6 +1172,7 @@ class CardBrowserFragment :
         fun onSelectedRowsChanged(rows: Set<Any>) {
             legacyToolbarTitle?.text = rows.size.toString()
             cardsAdapter.notifyDataSetChanged()
+            if (isHostedInBottomNavigation()) invalidateMenu()
         }
 
         fun onPaneRowChanged(newPaneRow: CardOrNoteId?) {
@@ -1253,32 +1237,16 @@ class CardBrowserFragment :
             startDeckSelection(title = getString(CommonString.search_deck), asChild = true, skipEmptyDefault = true)
         }
 
-        fun advancedSearchChanged(inAdvancedSearch: Boolean) {
-            toggleAdvancedSearch?.text = if (inAdvancedSearch) "Basic search" else "Advanced search"
-
-            if (searchView == null) return
-
-            val standard = getOrCreateSearchFragment(StandardSearchFragment.TAG, ::StandardSearchFragment)
-            val advanced =
-                if (inAdvancedSearch) {
-                    getOrCreateSearchFragment(AdvancedSearchFragment.TAG, ::AdvancedSearchFragment)
-                } else {
-                    childFragmentManager.findFragmentByTag(AdvancedSearchFragment.TAG)
-                }
-
-            childFragmentManager.commit {
-                if (inAdvancedSearch) {
-                    hide(standard)
-                    show(requireNotNull(advanced))
-                } else {
-                    advanced?.let { hide(it) }
-                    show(standard)
-                }
-            }
-        }
-
         fun onSearchViewTextChanged(text: String) {
             searchView?.editText?.replaceText(text)
+        }
+
+        suspend fun onSearchBarQueryChanged(search: SearchRequest) {
+            val text = search.toUserSpannable()
+            // Collection access can suspend while the draft or active request changes.
+            if (activity?.isFinishing == true || searchViewModel.isScreenOpenFlow.value) return
+            if (activityViewModel.searchRequestFlow.value != search) return
+            searchBar?.setText(text)
         }
 
         fun onCanSaveChanged(canSave: Boolean) {
@@ -1296,11 +1264,17 @@ class CardBrowserFragment :
             // Queued search updates can arrive after finish(), before the lifecycle stops.
             if (activity?.isFinishing == true) return
 
-            // WARN: This changes the text when the SearchView is open
-            launchCatchingTask { searchBar?.setText(value.toUserSpannable()) }
-
             Timber.i("relaying submitted search to activity")
-            activityViewModel.launchSearchForCards(value, forceRefresh = false, feedbackMode = BrowserSearchFeedbackMode.SEARCH_RESULTS)
+            // Consume this submission so lifecycle restarts do not replay the search.
+            searchViewModel.submittedSearchFlow.tryEmit(null)
+            activityViewModel.launchSearchForCards(
+                value,
+                forceRefresh = false,
+                feedbackMode = BrowserSearchFeedbackMode.SEARCH_RESULTS,
+                onSuccess = {
+                    searchViewModel.onSearchSucceeded(value)
+                },
+            )
         }
 
         fun onUserMessage(message: UserMessage) =
@@ -1328,13 +1302,9 @@ class CardBrowserFragment :
             }
 
         fun onSearchRequestUpdated(search: SearchRequest) {
+            if (activity?.isFinishing == true) return
             Timber.d("syncing searchview state from chip updates")
             val filters = search.filters
-
-            // Handle default search text
-            if (search.query.isNotEmpty() && searchBar?.text.isNullOrEmpty()) {
-                launchCatchingTask { searchBar?.setText(search.toUserSpannable()) }
-            }
 
             legacyDeckName?.text = filters.decks.firstOrNull()?.name ?: TR.sentenceCase.allDecks
             decksChip?.text = filters.decks.firstOrNull()?.name ?: TR.sentenceCase.allDecks
@@ -1428,7 +1398,6 @@ class CardBrowserFragment :
         viewModel.flowOfSearchForDecks.collectInLifecycle(::onSearchForDecks)
         activityViewModel.flowOfScrollRequest.collectInLifecycle(::autoScrollTo)
         activityViewModel.flowOfCanSearch.collectInLifecycle(::onCanSaveChanged)
-        searchViewModel.advancedSearchFlow.collectInLifecycle(::advancedSearchChanged)
         searchViewModel.searchTextFlow.collectInLifecycle(::onSearchViewTextChanged)
         searchViewModel.closeSearchViewFlow.collectInLifecycle(::onSearchViewClosed)
         // Since the Browse tab is phone-only, we don't accept side-by-side (tablet) requests
@@ -1440,6 +1409,9 @@ class CardBrowserFragment :
         searchViewModel.submittedSearchFlow.filterNotNull().collectInLifecycle(::onSearchSubmitted)
         searchViewModel.userMessageFlow.filterNotNull().collectInLifecycle(::onUserMessage)
         activityViewModel.searchRequestFlow.collectInLifecycle(::onSearchRequestUpdated)
+        if (useSearchView) {
+            searchViewModel.searchBarQueryFlow(activityViewModel.searchRequestFlow).collectInLifecycle(::onSearchBarQueryChanged)
+        }
         activityViewModel.flowOfChangeNoteType.collectInLifecycle(::onChangeNoteType)
         activityViewModel.flowOfSaveSearchNamePrompt.collectInLifecycle(::onSaveSearchNamePrompt)
         activityViewModel.flowOfSortTypeChanged.collectInLifecycle(::onSortTypeChanged)
@@ -1758,7 +1730,7 @@ class CardBrowserFragment :
     @VisibleForTesting
     fun toggleMark() =
         launchCatchingTask {
-            activityViewModel.toggleMark()
+            activityViewModel.onEvent(BrowserEvent.ToggleMarkRequested)
         }
 
     fun toggleSuspendCards() = launchCatchingTask { activityViewModel.toggleSuspendCards().join() }

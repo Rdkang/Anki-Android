@@ -27,6 +27,11 @@ plugins {
 }
 
 repositories {
+    // Robolectric from Google's mirror of Maven Central: see settings.gradle.kts
+    maven {
+        url = uri("https://maven-central.storage-download.googleapis.com/maven2")
+        content { includeGroup("org.robolectric") }
+    }
     google()
     mavenCentral()
     maven { url = uri("https://jitpack.io") }
@@ -111,7 +116,6 @@ android {
 
     defaultConfig {
         applicationId = "com.ichi2.anki"
-        buildConfigField("Boolean", "CI", (System.getenv("CI") == "true").toString())
         buildConfigField("String", "ACRA_URL", "\"https://ankidroid.org/acra/report\"")
         buildConfigField("String", "BACKEND_VERSION", "\"${libs.versions.ankiBackend.get()}\"")
         buildConfigField("Boolean", "ENABLE_LEAK_CANARY", "false")
@@ -142,9 +146,9 @@ android {
         //
         // This ensures the correct ordering between the various types of releases (dev < alpha < beta < release) which is
         // needed for upgrades to be offered correctly.
-        versionCode = 22600114
+        versionCode = 22600116
         // If you change this to a new version, you probably also want to update .gradle/workflows/milestone.yml for the new version...
-        versionName = "2.26.0alpha14"
+        versionName = "2.26.0alpha16"
         testApplicationId = "com.ichi2.anki.tests"
         vectorDrawables.useSupportLibrary = true
         testInstrumentationRunner = "com.ichi2.testutils.NewCollectionPathTestRunner"

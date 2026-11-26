@@ -27,6 +27,7 @@ import com.ichi2.anki.common.destinations.NoteEditorDestination
 import com.ichi2.anki.common.utils.ext.schedulerVersion
 import com.ichi2.anki.configureRenderingMode
 import com.ichi2.anki.isLoggedIn
+import com.ichi2.anki.launchCatching
 import com.ichi2.anki.launchCatchingIO
 import com.ichi2.anki.libanki.CardId
 import com.ichi2.anki.libanki.Consts.DEFAULT_DECK_ID
@@ -56,11 +57,13 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.combineTransform
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import net.ankiweb.rsdroid.BackendException
 import net.ankiweb.rsdroid.RustCleanup
 import net.ankiweb.rsdroid.exceptions.BackendInvalidInputException.BackendCollectionNotOpenException
 import net.ankiweb.rsdroid.exceptions.BackendNetworkException
@@ -76,6 +79,7 @@ class DeckPickerViewModel :
     OnErrorListener,
     HasProgress<DeckPickerProgress> {
     override val progressManager = ProgressManager<DeckPickerProgress>()
+    override val onError = Channel<Exception>(Channel.BUFFERED)
 
     val flowOfStartupResponse = MutableStateFlow<StartupResponse?>(null)
 
@@ -119,24 +123,38 @@ class DeckPickerViewModel :
     private val flowOfRefreshDeckList = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     val flowOfDeckList =
-        combine(
+        combineTransform(
             flowOfDeckDueTree,
             flowOfDeckSearchQuery,
             flowOfFocusedDeck,
             flowOfRefreshDeckList.onStart { emit(Unit) },
         ) { tree, query, _, _ ->
-            if (tree == null) return@combine FlattenedDeckList.empty
+            if (tree == null) {
+                emit(FlattenedDeckList.empty)
+                return@combineTransform
+            }
 
             // TODO: use flowOfFocusedDeck once it's set on all instances
             // This flow can outlive the visible screen. Do not reopen the collection just to redraw it.
             val currentDeckId =
-                withOpenColOrNull { decks.current().id }
-                    ?: return@combine FlattenedDeckList.empty
+                try {
+                    withOpenColOrNull { decks.current().id }
+                } catch (e: BackendException) {
+                    onError.send(e)
+                    // Keep the previous deck list and retry on the next update.
+                    return@combineTransform
+                }
+            if (currentDeckId == null) {
+                emit(FlattenedDeckList.empty)
+                return@combineTransform
+            }
             Timber.i("currentDeckId: %d", currentDeckId)
 
-            FlattenedDeckList(
-                data = tree.filterAndFlattenDisplay(DeckFilters.create(query), currentDeckId),
-                hasSubDecks = tree.children.any { it.children.any() },
+            emit(
+                FlattenedDeckList(
+                    data = tree.filterAndFlattenDisplay(DeckFilters.create(query), currentDeckId),
+                    hasSubDecks = tree.children.any { it.children.any() },
+                ),
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, initialValue = FlattenedDeckList.empty)
 
@@ -151,7 +169,6 @@ class DeckPickerViewModel :
     val emptyCardsNotification = MutableSharedFlow<EmptyCardsResult>(extraBufferCapacity = 1)
     val flowOfDestination = MutableSharedFlow<Destination>(extraBufferCapacity = 1)
     val flowOfNavigate = MutableSharedFlow<NavigateDestination>(extraBufferCapacity = 1)
-    override val onError = Channel<Exception>(Channel.BUFFERED)
     val flowOfExportDeck = MutableSharedFlow<DeckId>()
     val flowOfCreateShortcut = MutableSharedFlow<ShortcutData>()
     val flowOfDisableShortcuts = MutableSharedFlow<List<String>>()
@@ -266,7 +283,7 @@ class DeckPickerViewModel :
                             filter = DeckFilters.create(flowOfDeckSearchQuery.value),
                         )
                     }
-                focusedDeck = withCol { decks.selected() }
+                withCol { focusedDeck = decks.selected() }
 
                 deckDeletedNotification.emit(
                     DeckDeletionResult(deckName = deckName, cardsDeleted = changes.count),
@@ -296,7 +313,7 @@ class DeckPickerViewModel :
     fun deleteEmptyCards(
         report: EmptyCardsReport,
         preserveNotes: Boolean,
-    ) = viewModelScope.launch {
+    ) = launchCatching {
         progressManager.withProgress(message = DeckPickerProgress.DELETING_EMPTY_CARDS) {
             // https://github.com/ankitects/anki/blob/39e293b27d36318e00131fd10144755eec8d1922/qt/aqt/emptycards.py#L98-L109
             val toDelete = mutableListOf<CardId>()
@@ -342,13 +359,24 @@ class DeckPickerViewModel :
     /**
      * Marks [deckId] as the currently selected deck and updates the selection in the deck list.
      */
-    fun selectDeck(deckId: DeckId) =
-        viewModelScope.launch {
-            // TODO: should we always reset the Card Browser default deck here?
-            withCol { decks.select(deckId) }
-            focusedDeck = deckId
-            flowOfRefreshDeckList.emit(Unit)
+    fun selectDeck(deckId: DeckId) = launchCatching { markDeckSelected(deckId) }
+
+    val flowOfCreatedDeckSelected = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    fun selectCreatedDeck(deckId: DeckId) =
+        launchCatching {
+            markDeckSelected(deckId)
+            flowOfCreatedDeckSelected.emit(Unit)
         }
+
+    private suspend fun markDeckSelected(deckId: DeckId) {
+        // TODO: should we always reset the Card Browser default deck here?
+        withCol {
+            decks.select(deckId)
+            focusedDeck = deckId
+        }
+        flowOfRefreshDeckList.emit(Unit)
+    }
 
     fun browseCards(deckId: DeckId) =
         launchCatchingIO {
@@ -377,8 +405,8 @@ class DeckPickerViewModel :
     val flowOfShowRightClickContextMenu = MutableSharedFlow<RightClickMenuRequest>(extraBufferCapacity = 1)
 
     fun requestContextMenu(deckId: DeckId) =
-        viewModelScope.launch {
-            selectDeck(deckId).join()
+        launchCatching {
+            markDeckSelected(deckId)
             flowOfShowContextMenu.emit(deckId)
         }
 
@@ -386,8 +414,8 @@ class DeckPickerViewModel :
         deckId: DeckId,
         x: Float,
         y: Float,
-    ) = viewModelScope.launch {
-        selectDeck(deckId).join()
+    ) = launchCatching {
+        markDeckSelected(deckId)
         flowOfShowRightClickContextMenu.emit(RightClickMenuRequest(deckId, x, y))
     }
 
@@ -475,7 +503,7 @@ class DeckPickerViewModel :
 
                 // TODO: This is in the wrong place
                 // Backend returns studiedToday() with newlines for HTML formatting,so we replace them with spaces.
-                flowOfStudiedTodayStats.value = withCol { sched.studiedToday().replace("\n", " ") }
+                withCol { flowOfStudiedTodayStats.value = sched.studiedToday().replace("\n", " ") }
 
                 /**
                  * Checks the current scheduler version and prompts the upgrade dialog if using the legacy version.
@@ -492,7 +520,7 @@ class DeckPickerViewModel :
 
                 // TODO: This is in the wrong place
                 // current deck may have changed
-                focusedDeck = withCol { decks.current().id }
+                withCol { focusedDeck = decks.current().id }
                 refreshUndoMenuState()
 
                 // Reopening can leave the counts and selection unchanged after a skipped display refresh.

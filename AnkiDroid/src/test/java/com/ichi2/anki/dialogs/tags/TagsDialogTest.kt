@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.FragmentActivity
@@ -159,6 +160,37 @@ class TagsDialogTest : RobolectricTest() {
                     .map { RecyclerViewUtils.viewHolderAt<TagsArrayAdapter.ViewHolder>(recycler, it) }
             assertEquals(listOf("parent", "parent::added", "parent::existing"), rows.map { it.text })
             assertEquals(CHECKED, rows[1].checkboxState)
+        }
+    }
+
+    /**
+     * The Edit Tags search field is also an Add Tag shortcut. Pasting an indented tag
+     * there should add the tag itself, without inventing an empty parent.
+     */
+    @Test
+    fun `adding from search ignores leading ideographic whitespace`() {
+        runTagsDialogScenario(editTagsArguments(emptyList())) { fragment ->
+            val menu = fragment.binding.toolbar.root.menu
+            val search = menu.findItem(R.id.tags_dialog_action_filter)
+            // The Add action uses the search query directly only with the search field expanded.
+            assertTrue(search.expandActionView())
+            val input = search.actionView!!.findViewById<EditText>(androidx.appcompat.R.id.search_src_text)
+            input.setText("\u3000子")
+            assertTrue(menu.performIdentifierAction(R.id.tags_dialog_action_add, 0))
+            advanceRobolectricLooper()
+
+            val recycler = fragment.forceLayout()
+            val rows =
+                (0 until recycler.adapter!!.itemCount).map {
+                    RecyclerViewUtils.viewHolderAt<TagsArrayAdapter.ViewHolder>(
+                        recycler,
+                        it,
+                    )
+                }
+            // Fails before the fix because the search filter emits `::` at the start of the query,
+            // and Add turns the empty first component into a visible `blank` tag.
+            assertEquals(listOf("子"), rows.map { it.text.trim() })
+            assertEquals(CHECKED, rows.single().checkboxState)
         }
     }
 
@@ -361,6 +393,70 @@ class TagsDialogTest : RobolectricTest() {
                 actual = addTagDialog.positiveButton.isEnabled,
                 message = "OK should be enabled for a valid tag",
             )
+        }
+    }
+
+    @Test
+    fun `typing an ideographic space in a tag creates a hierarchy separator`() {
+        withAddTagDialog(emptyList()) { dialog ->
+            val input = dialog.getInputField()
+            input.setText("parent\u3000child")
+            assertEquals("parent::child", input.text.toString())
+        }
+    }
+
+    /**
+     * Pasting consecutive spaces in an Add Tag dialog should create one hierarchy separator,
+     * like typing the spaces individually. An extra separator creates an unwanted `blank` subtag.
+     */
+    @Test
+    fun `pasting consecutive tag spaces creates one hierarchy separator`() {
+        withAddTagDialog(emptyList()) { dialog ->
+            val input = dialog.getInputField()
+            for (spaces in listOf("\u3000\u3000", " \u3000")) {
+                input.setText("parent")
+                // Insert the clipboard contents in one edit so the filter sees both spaces together.
+                input.text.insert(input.text.length, "${spaces}child")
+                // Fails on the buggy revision because the second space adds another pair of colons.
+                assertEquals("parent::child", input.text.toString())
+            }
+        }
+    }
+
+    /**
+     * When a Japanese IME updates a phrase containing an ideographic space, committing it must
+     * replace the composing phrase after the tag filter changes the space into a separator.
+     */
+    @Test
+    fun `committing an ideographic tag phrase replaces the composing text`() {
+        withAddTagDialog(emptyList()) { dialog ->
+            val input = dialog.getInputField()
+            val connection = requireNotNull(input.onCreateInputConnection(EditorInfo()))
+
+            // Begin composing an incomplete reading. The input filter makes the phrase longer.
+            connection.setComposingText("親\u3000こ", 1)
+            assertEquals("親::こ", input.text.toString())
+
+            // The IME replaces the composing range with the chosen characters. On the buggy
+            // revision, the filter lost that range, so the committed phrase is appended instead.
+            connection.commitText("親\u3000子", 1)
+            assertEquals("親::子", input.text.toString())
+        }
+    }
+
+    /**
+     * A copied tag can start with an ideographic space. Only a space inside a tag name
+     * should create a hierarchy separator. There is no parent before a leading space.
+     */
+    @Test
+    fun `pasted leading ideographic space does not create an empty parent tag`() {
+        withAddTagDialog(emptyList()) { dialog ->
+            val input = dialog.getInputField()
+            // Supply the entire clipboard text to the filter in one edit, including its indentation.
+            input.setText("\u3000子")
+
+            // Fails on the buggy revision, where `::子` produces a spurious `blank::子` tag on submission.
+            assertEquals("子", input.text.toString().trim())
         }
     }
 

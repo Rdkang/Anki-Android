@@ -3,16 +3,21 @@
 package com.ichi2.compose.ui.components
 
 import android.os.Build
-import androidx.compose.material3.Snackbar
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.SnackbarData
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.AccessibilityManager
 import androidx.compose.ui.platform.LocalAccessibilityManager
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
 import androidx.compose.material3.SnackbarHost as MaterialSnackbarHost
 import com.google.android.material.snackbar.Snackbar as ViewSnackbar
 
@@ -21,14 +26,42 @@ import com.google.android.material.snackbar.Snackbar as ViewSnackbar
 fun SnackbarHost(
     hostState: SnackbarHostState,
     modifier: Modifier = Modifier,
-    snackbar: @Composable (SnackbarData) -> Unit = { Snackbar(it) },
+    timeoutPaused: Boolean = false,
+    snackbar: @Composable (SnackbarData) -> Unit = { AnkiDroidSnackbar(it, Modifier.padding(12.dp)) },
+) {
+    SnackbarHost(hostState, modifier, touch = null, timeoutPaused = timeoutPaused, snackbar = snackbar)
+}
+
+@Composable
+internal fun SnackbarHost(
+    hostState: SnackbarHostState,
+    modifier: Modifier,
+    touch: State<SnackbarTouch?>?,
+    timeoutPaused: Boolean = false,
+    snackbar: @Composable (SnackbarData) -> Unit,
 ) {
     val accessibilityManager = LocalAccessibilityManager.current
     val duration = hostState.currentSnackbarData?.visuals?.duration
     val timeouts = remember(accessibilityManager, duration) { SnackbarAccessibilityManager(accessibilityManager, duration) }
-    // Material's host owns the timeout and animations; adapt only its accessibility calculation
-    // so there is one timer for the currently displayed message.
-    CompositionLocalProvider(LocalAccessibilityManager provides timeouts) {
+    val data = hostState.currentSnackbarData
+    val scheduledTouch = touch?.value
+    LaunchedEffect(data, timeoutPaused, scheduledTouch, timeouts) {
+        if (data != null && !timeoutPaused && scheduledTouch?.pressed != true) {
+            delay(
+                timeouts
+                    .calculateRecommendedTimeoutMillis(
+                        originalTimeoutMillis = 0L,
+                        containsIcons = true,
+                        containsText = true,
+                        containsControls = data.visuals.actionLabel != null,
+                    ).milliseconds,
+            )
+            // A pointer event may have changed the touch state before recomposition runs.
+            if (touch?.value === scheduledTouch) data.dismiss()
+        }
+    }
+    // Keep Material's transitions, but give our pausable timer sole ownership of dismissal.
+    CompositionLocalProvider(LocalAccessibilityManager provides NoSnackbarTimeout) {
         MaterialSnackbarHost(hostState, modifier) { data ->
             // The timeout override applies only to the host, not to custom snackbar content.
             CompositionLocalProvider(LocalAccessibilityManager provides accessibilityManager) {
@@ -36,6 +69,21 @@ fun SnackbarHost(
             }
         }
     }
+}
+
+/** Each touch transition has its own identity, even if a tap starts and ends in one frame. */
+internal class SnackbarTouch(
+    val pressed: Boolean,
+)
+
+/** Disables Material's timer while the host above manages the current message's duration. */
+private object NoSnackbarTimeout : AccessibilityManager {
+    override fun calculateRecommendedTimeoutMillis(
+        originalTimeoutMillis: Long,
+        containsIcons: Boolean,
+        containsText: Boolean,
+        containsControls: Boolean,
+    ): Long = Long.MAX_VALUE
 }
 
 /**

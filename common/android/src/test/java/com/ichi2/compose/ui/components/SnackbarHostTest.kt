@@ -8,11 +8,14 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.AccessibilityManager
 import androidx.compose.ui.platform.LocalAccessibilityManager
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.unit.dp
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -30,6 +33,92 @@ class SnackbarHostTest {
     @get:Rule
     val compose = createComposeRule()
     private val host = SnackbarHostState()
+
+    @Test
+    fun `holding a swipeable snackbar pauses dismissal until release`() {
+        show(swipeable = true) { showSnackbar("Hold me") }
+        compose.mainClock.advanceTimeBy(500)
+        val message = compose.onNodeWithText("Hold me")
+        message.performTouchInput { down(center) }
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        compose.mainClock.advanceTimeBy(10_000)
+        assertEquals("Hold me", host.currentSnackbarData?.visuals?.message)
+        message.performTouchInput { up() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        compose.mainClock.advanceTimeBy(1_300)
+        assertEquals("Hold me", host.currentSnackbarData?.visuals?.message)
+        compose.mainClock.advanceTimeBy(300)
+        assertNull(host.currentSnackbarData)
+    }
+
+    @Test
+    fun `touch just before the timeout restarts it on release`() {
+        val timeout = 1_508L
+        var timerStartedAt = 0L
+        val manager =
+            object : AccessibilityManager {
+                override fun calculateRecommendedTimeoutMillis(
+                    originalTimeoutMillis: Long,
+                    containsIcons: Boolean,
+                    containsText: Boolean,
+                    containsControls: Boolean,
+                ): Long {
+                    timerStartedAt = compose.mainClock.currentTime
+                    return timeout
+                }
+            }
+        show(manager, swipeable = true) { showSnackbar("Hold me", duration = SnackbarDuration.Short) }
+        val message = compose.onNodeWithText("Hold me")
+        val deadline = timerStartedAt + timeout
+        compose.mainClock.advanceTimeBy(deadline - compose.mainClock.currentTime - 1, ignoreFrameDuration = true)
+        message.performTouchInput { down(center) }
+        compose.mainClock.advanceTimeBy(32)
+        assertEquals("Hold me", host.currentSnackbarData?.visuals?.message)
+
+        message.performTouchInput { up() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        compose.mainClock.advanceTimeBy(1_300)
+        assertEquals("Hold me", host.currentSnackbarData?.visuals?.message)
+        compose.mainClock.advanceTimeBy(300)
+        assertNull(host.currentSnackbarData)
+    }
+
+    @Test
+    fun `cancelled touch resumes the snackbar timeout`() {
+        show(swipeable = true) { showSnackbar("Cancel touch", duration = SnackbarDuration.Long) }
+        val message = compose.onNodeWithText("Cancel touch")
+        message.performTouchInput { down(center) }
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        compose.mainClock.advanceTimeBy(5_000)
+        assertEquals("Cancel touch", host.currentSnackbarData?.visuals?.message)
+        message.performTouchInput { cancel() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        compose.mainClock.advanceTimeBy(2_500)
+        assertEquals("Cancel touch", host.currentSnackbarData?.visuals?.message)
+        compose.mainClock.advanceTimeBy(350)
+        assertNull(host.currentSnackbarData)
+    }
+
+    @Test
+    fun `slight inward drift does not undo a swipe past halfway`() {
+        show(swipeable = true) { showSnackbar("Swipe me", duration = SnackbarDuration.Indefinite) }
+        compose.mainClock.advanceTimeBy(500)
+        compose.onNodeWithText("Swipe me").performTouchInput {
+            down(center)
+            repeat(10) { moveBy(Offset(24.dp.toPx(), 0f), delayMillis = 50) }
+            repeat(8) { moveBy(Offset(-0.4.dp.toPx(), 0f), delayMillis = 16) }
+            up()
+        }
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.waitForIdle()
+
+        assertNull(host.currentSnackbarData)
+    }
 
     @Test
     fun `short messages last 1500 milliseconds`() {
@@ -136,12 +225,15 @@ class SnackbarHostTest {
 
     private fun show(
         accessibilityManager: AccessibilityManager? = null,
+        swipeable: Boolean = false,
         messages: suspend SnackbarHostState.() -> Unit,
     ) {
         compose.mainClock.autoAdvance = false
         compose.setContent {
             CompositionLocalProvider(LocalAccessibilityManager provides accessibilityManager) {
-                MaterialTheme { SnackbarHost(host) }
+                MaterialTheme {
+                    if (swipeable) SwipeableSnackbarHost(host) else SnackbarHost(host)
+                }
             }
             LaunchedEffect(host) { host.messages() }
         }
